@@ -5,6 +5,7 @@ import { join } from 'path'
 import { FFMPEG_PATH } from './ffmpeg-path'
 import { generatePeaksFromPcm } from './peaks'
 import { serializePeaks } from './decode'
+import { durationMsFromPcmSamples } from '../media/duration'
 import type { WaveformPeaks } from '../../shared/types'
 
 const FFMPEG = FFMPEG_PATH
@@ -27,7 +28,7 @@ function runFfmpeg(args: string[]): Promise<void> {
 
 export async function generatePeaksFromAudioFile(
   filePath: string
-): Promise<{ sampleRate: number; peaks: WaveformPeaks }> {
+): Promise<{ sampleRate: number; peaks: WaveformPeaks; durationMs: number }> {
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const pcmPath = join(tmpdir(), `waveform-${id}.raw`)
 
@@ -48,8 +49,9 @@ export async function generatePeaksFromAudioFile(
     const buffer = await fs.readFile(pcmPath)
     const samples = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4)
     const peaks = generatePeaksFromPcm(samples, [256, 1024, 4096, 16384])
+    const durationMs = durationMsFromPcmSamples(samples.length, SAMPLE_RATE)
 
-    return { sampleRate: SAMPLE_RATE, peaks: serializePeaks(peaks) }
+    return { sampleRate: SAMPLE_RATE, peaks: serializePeaks(peaks), durationMs }
   } finally {
     await fs.unlink(pcmPath).catch(() => {})
   }
