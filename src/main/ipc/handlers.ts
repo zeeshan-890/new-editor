@@ -16,6 +16,7 @@ import type {
   GenerationProject,
   MediaAsset,
   TimelineLayer,
+  VideoFilmstrip,
   WaveformPeaks
 } from '../../shared/types'
 import { decodeAudio, serializePeaks } from '../audio/decode'
@@ -51,6 +52,7 @@ import type {
 import { getLogFilePath, logError } from '../logger'
 import { probeMediaFile } from '../video/probe'
 import { exportVideoSequence } from '../video/export'
+import { filmstripForImage, generateVideoFilmstrip } from '../video/filmstrip'
 import { downloadMedia } from '../higgsfield/cli'
 import {
   createProject,
@@ -198,6 +200,19 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   ipcMain.handle(IPC.VIDEO_PROBE, async (_e, filePath: string) => probeMediaFile(filePath))
 
   ipcMain.handle(
+    IPC.VIDEO_FILMSTRIP,
+    async (
+      _e,
+      payload: { filePath: string; durationMs: number; type: MediaAsset['type'] }
+    ): Promise<VideoFilmstrip> => {
+      if (payload.type === 'image') {
+        return filmstripForImage(payload.filePath, payload.durationMs)
+      }
+      return generateVideoFilmstrip(payload.filePath, payload.durationMs)
+    }
+  )
+
+  ipcMain.handle(
     IPC.VIDEO_EXPORT,
     async (
       _e,
@@ -251,7 +266,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
 
   ipcMain.handle(
     IPC.AUDIO_PEAKS,
-    async (_e, filePath: string): Promise<{ sampleRate: number; peaks: WaveformPeaks }> =>
+    async (_e, filePath: string): Promise<{ sampleRate: number; peaks: WaveformPeaks; durationMs: number }> =>
       generatePeaksFromAudioFile(filePath)
   )
 
