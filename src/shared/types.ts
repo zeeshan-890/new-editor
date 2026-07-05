@@ -90,7 +90,7 @@ export interface Preset {
 
 export const DEFAULT_DETECTION_PARAMS: DetectionParams = {
   mode: 'hybrid',
-  thresholdDb: -40,
+  thresholdDb: -55,
   minSilenceDurationMs: 500,
   minSpeechDurationMs: 250,
   prePaddingMs: 100,
@@ -368,6 +368,14 @@ export interface MediaAsset {
   height?: number
 }
 
+/** Thumbnail sequence for video/image clips on the timeline. */
+export interface VideoFilmstrip {
+  durationMs: number
+  intervalMs: number
+  frameWidth: number
+  frames: string[]
+}
+
 export interface TimelineClip {
   id: string
   assetId: string
@@ -416,13 +424,13 @@ export function clipDurationMs(clip: TimelineClip): number {
 }
 
 export function sequenceDurationMs(layers: TimelineLayer[]): number {
-  let max = 1000
+  let max = 0
   for (const layer of layers) {
     for (const clip of layer.clips) {
       max = Math.max(max, clip.timelineStartMs + clipDurationMs(clip))
     }
   }
-  return max
+  return Math.max(max, 1000)
 }
 
 export function createEmptyModeDraft(mode: GenerationMode): GenerationModeDraft {
