@@ -18,9 +18,9 @@ import { VideoAudioSilencePanel } from './VideoAudioSilencePanel'
 import { useVideoEditorStore } from '@renderer/stores/videoEditorStore'
 import { usePlaybackStore } from '@renderer/stores/playbackStore'
 import { useVideoEditorHotkeys } from '@renderer/hooks/useVideoEditorHotkeys'
+import { useVideoEditorPlayback } from '@renderer/hooks/useVideoEditorPlayback'
 import { clipDurationMs } from '@shared/types'
 import { formatTime } from '@renderer/lib/utils'
-import { localAudioPathUrl } from '@renderer/lib/localFileProtocol'
 import {
   allowFileDrop,
   filePathFromDrop,
@@ -62,12 +62,15 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
   const setIsPlaying = usePlaybackStore((s) => s.setIsPlaying)
   const zoomIn = usePlaybackStore((s) => s.zoomIn)
   const zoomOut = usePlaybackStore((s) => s.zoomOut)
+  const fitTimelineView = usePlaybackStore((s) => s.fitTimelineView)
+  const setScrollMs = usePlaybackStore((s) => s.setScrollMs)
+  const scrollMs = usePlaybackStore((s) => s.scrollMs)
+  const zoom = usePlaybackStore((s) => s.zoom)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
   const imageRef = useRef<HTMLImageElement>(null)
-  const rafRef = useRef<number | null>(null)
-  const lastTick = useRef<number>(0)
+  const masterPathRef = useRef<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [dragOverBin, setDragOverBin] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -113,7 +116,7 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
               .project.layers.find((l) => l.type === 'overlay')?.id
           }
 
-          addClipToLayer(asset.id, layerId)
+          addClipToLayer(asset.id, layerId, 0)
           imported++
         } catch (err) {
           lastError = err instanceof Error ? err.message : String(err)
@@ -122,11 +125,14 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
       }
 
       setImporting(false)
+      if (imported > 0) {
+        fitTimelineView()
+      }
       if (imported === 0 && paths.length > 0) {
         setError(lastError ?? 'Could not import the selected file(s). Check format and try again.')
       }
     },
-    [addAsset, addClipToLayer, addLayer]
+    [addAsset, addClipToLayer, addLayer, fitTimelineView]
   )
 
   const importMedia = useCallback(async (): Promise<void> => {
@@ -166,6 +172,19 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
   const active = visualClipAtPlayhead(playheadMs)
   const audioActive = audioClipAtPlayhead(playheadMs)
 
+  useVideoEditorPlayback(videoRef, audioRef, masterPathRef)
+
+  useEffect(() => {
+    const visibleDuration = durationMs / zoom
+    const maxScroll = Math.max(0, durationMs - visibleDuration)
+    if (scrollMs > maxScroll) {
+      setScrollMs(maxScroll)
+    }
+    if (playheadMs > durationMs) {
+      setPlayheadMs(durationMs)
+    }
+  }, [durationMs, scrollMs, playheadMs, zoom, setScrollMs, setPlayheadMs])
+
   useEffect(() => {
     const onDragOver = (event: DragEvent): void => {
       event.preventDefault()
@@ -173,72 +192,6 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
     document.addEventListener('dragover', onDragOver)
     return () => document.removeEventListener('dragover', onDragOver)
   }, [])
-
-  useEffect(() => {
-    if (!active) return
-    const { clip, asset } = active
-    const sourceMs = clip.sourceInMs + (playheadMs - clip.timelineStartMs)
-    if (asset.type === 'video' && videoRef.current) {
-      const el = videoRef.current
-      if (Math.abs(el.currentTime * 1000 - sourceMs) > 120) {
-        el.currentTime = sourceMs / 1000
-      }
-      if (isPlaying) {
-        void el.play().catch(() => {})
-      } else {
-        el.pause()
-      }
-    }
-  }, [active, playheadMs, isPlaying])
-
-  useEffect(() => {
-    if (!audioActive || !audioRef.current) return
-    const { clip, asset } = audioActive
-    const sourceMs = clip.sourceInMs + (playheadMs - clip.timelineStartMs)
-    const el = audioRef.current
-    const src = localAudioPathUrl(asset.path)
-    if (el.src !== src) {
-      el.src = src
-    }
-    if (Math.abs(el.currentTime * 1000 - sourceMs) > 120) {
-      el.currentTime = sourceMs / 1000
-    }
-  }, [audioActive, playheadMs])
-
-  useEffect(() => {
-    const el = audioRef.current
-    if (!el) return
-    if (isPlaying && audioActive) {
-      void el.play().catch(() => {})
-    } else {
-      el.pause()
-    }
-  }, [isPlaying, audioActive])
-
-  useEffect(() => {
-    if (!isPlaying) {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current)
-      return
-    }
-    lastTick.current = performance.now()
-    const tick = (now: number): void => {
-      const delta = now - lastTick.current
-      lastTick.current = now
-      const ms = usePlaybackStore.getState().playheadMs
-      const next = ms + delta
-      if (next >= durationMs) {
-        setIsPlaying(false)
-        setPlayheadMs(durationMs)
-      } else {
-        setPlayheadMs(next)
-      }
-      rafRef.current = requestAnimationFrame(tick)
-    }
-    rafRef.current = requestAnimationFrame(tick)
-    return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current)
-    }
-  }, [isPlaying, durationMs, setPlayheadMs, setIsPlaying])
 
   const addToTimeline = useCallback(
     (assetId: string) => {
@@ -341,7 +294,7 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
 
         <main className="flex-1 flex flex-col min-w-0 min-h-0">
           <div className="flex-1 min-h-[200px] flex items-center justify-center bg-black/80 border-b border-border relative">
-            <audio ref={audioRef} className="hidden" />
+            <audio ref={audioRef} className="hidden" preload="auto" />
             {active ? (
               active.asset.type === 'video' ? (
                 <video
@@ -349,7 +302,9 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
                   key={active.asset.id}
                   src={localMediaUrl(active.asset.path, active.asset.type)}
                   className="max-h-full max-w-full"
-                  muted
+                  muted={Boolean(audioActive)}
+                  playsInline
+                  preload="auto"
                 />
               ) : (
                 <img
@@ -379,6 +334,9 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
               {formatTime(playheadMs)} / {formatTime(durationMs)}
             </span>
             <div className="flex-1" />
+            <Button size="sm" variant="outline" onClick={fitTimelineView} title="Fit timeline to content">
+              Fit
+            </Button>
             <Button size="sm" variant="outline" onClick={zoomOut}>
               <ZoomOut size={14} />
             </Button>
