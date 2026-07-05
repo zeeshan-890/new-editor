@@ -17,6 +17,7 @@ import type {
   HiggsfieldVoice,
   HiggsfieldWorkspace,
   LoadedAudioProject,
+  WaveformPeaks,
   Preset,
   AppSession,
   AppTab,
@@ -31,6 +32,7 @@ export interface ElectronAPI {
   openImageFile: () => Promise<string | null>
   saveFile: (defaultName: string) => Promise<string | null>
   loadAudio: (filePath: string) => Promise<LoadedAudioProject>
+  getAudioPeaks: (filePath: string) => Promise<{ sampleRate: number; peaks: WaveformPeaks }>
   detectSilence: (params: DetectionParams) => Promise<DetectionResult>
   exportAudio: (
     operations: EditOperation[],
@@ -106,6 +108,7 @@ const api: ElectronAPI = {
   openImageFile: () => ipcRenderer.invoke(IPC.OPEN_IMAGE_FILE),
   saveFile: (defaultName) => ipcRenderer.invoke(IPC.SAVE_FILE, defaultName),
   loadAudio: (filePath) => ipcRenderer.invoke(IPC.LOAD_AUDIO, filePath),
+  getAudioPeaks: (filePath) => ipcRenderer.invoke(IPC.AUDIO_PEAKS, filePath),
   detectSilence: (params) => ipcRenderer.invoke(IPC.DETECT_SILENCE, params),
   exportAudio: (operations, options, crossfadeMs) =>
     ipcRenderer.invoke(IPC.EXPORT_AUDIO, operations, options, crossfadeMs),
