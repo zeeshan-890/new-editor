@@ -5,6 +5,7 @@ import { usePlaybackStore } from '@renderer/stores/playbackStore'
 import { clipDurationMs } from '@shared/types'
 import { localMediaPathUrl } from '@renderer/lib/localFileProtocol'
 import { clamp, cn, formatTime } from '@renderer/lib/utils'
+import { TimelineClipBlock } from './TimelineClipBlock'
 
 const LAYER_HEIGHT = 56
 const TRACK_HEADER_W = 140
@@ -154,18 +155,20 @@ export function VideoTimeline(): React.JSX.Element {
             >
               {layer.clips.map((clip) => {
                 const asset = assets.find((a) => a.id === clip.assetId)
+                if (!asset) return null
                 const left = msToX(clip.timelineStartMs)
                 const w = Math.max(24, msToX(clip.timelineStartMs + clipDurationMs(clip)) - left)
                 const selected = clip.id === selectedClipId
                 return (
-                  <div
+                  <TimelineClipBlock
                     key={clip.id}
-                    className={cn(
-                      'absolute top-1 bottom-1 rounded border px-1 text-[10px] overflow-hidden',
-                      layer.locked ? 'cursor-not-allowed opacity-70' : 'cursor-grab active:cursor-grabbing',
-                      selected ? 'border-primary bg-primary/25 ring-1 ring-primary' : style.clip
-                    )}
-                    style={{ left, width: w }}
+                    clip={clip}
+                    asset={asset}
+                    layer={layer}
+                    left={left}
+                    width={w}
+                    selected={selected}
+                    style={style}
                     onMouseDown={(e) => {
                       if (layer.locked) return
                       e.stopPropagation()
@@ -178,30 +181,17 @@ export function VideoTimeline(): React.JSX.Element {
                         startMs: clip.timelineStartMs
                       }
                     }}
-                    title={asset?.name}
-                  >
-                    <span className="truncate block">{asset?.name ?? 'Clip'}</span>
-                    {selected && !layer.locked && (
-                      <>
-                        <div
-                          className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize bg-primary/60"
-                          onMouseDown={(e) => {
-                            e.stopPropagation()
-                            pushHistory()
-                            trimRef.current = { edge: 'in', startX: e.clientX }
-                          }}
-                        />
-                        <div
-                          className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize bg-primary/60"
-                          onMouseDown={(e) => {
-                            e.stopPropagation()
-                            pushHistory()
-                            trimRef.current = { edge: 'out', startX: e.clientX }
-                          }}
-                        />
-                      </>
-                    )}
-                  </div>
+                    onTrimIn={(e) => {
+                      e.stopPropagation()
+                      pushHistory()
+                      trimRef.current = { edge: 'in', startX: e.clientX }
+                    }}
+                    onTrimOut={(e) => {
+                      e.stopPropagation()
+                      pushHistory()
+                      trimRef.current = { edge: 'out', startX: e.clientX }
+                    }}
+                  />
                 )
               })}
             </div>
