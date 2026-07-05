@@ -1,10 +1,10 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { EditorShell } from './components/layout/EditorShell'
+import { AppShell } from './components/layout/AppShell'
 import './styles/globals.css'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <EditorShell />
+    <AppShell />
   </StrictMode>
 )
