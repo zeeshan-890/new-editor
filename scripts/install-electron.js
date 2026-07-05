@@ -10,7 +10,7 @@ const distDir = join(electronDir, 'dist')
 const electronExe = join(distDir, 'electron.exe')
 const pathFile = join(electronDir, 'path.txt')
 
-async function main(): Promise<void> {
+async function main() {
   if (process.env.ELECTRON_SKIP_BINARY_DOWNLOAD) return
 
   if (existsSync(electronExe) && existsSync(pathFile)) {
