@@ -1,12 +1,18 @@
 import { create } from 'zustand'
-import type { MediaAsset, MediaAssetType, TimelineClip, TimelineLayer, VideoEditorProject } from '@shared/types'
+import type { MediaAsset, MediaAssetType, TimelineClip, TimelineLayer, VideoEditorProject, WaveformPeaks } from '@shared/types'
 import {
   clipDurationMs,
   createEmptyVideoEditorProject,
   generateId,
   sequenceDurationMs
 } from '@shared/types'
+import { normalizePeaks } from '@renderer/lib/audio/normalizePeaks'
 import { usePlaybackStore } from './playbackStore'
+
+export interface AssetWaveform {
+  sampleRate: number
+  peaks: WaveformPeaks
+}
 
 interface HistorySnapshot {
   layers: TimelineLayer[]
@@ -79,12 +85,15 @@ export const useVideoEditorStore = create<{
   undoStack: HistorySnapshot[]
   redoStack: HistorySnapshot[]
   durationMs: number
+  waveformCache: Record<string, AssetWaveform>
+  waveformLoading: Record<string, boolean>
 
   resetProject: () => void
   pushHistory: () => void
   undo: () => void
   redo: () => void
   addAsset: (asset: Omit<MediaAsset, 'id'>) => MediaAsset
+  loadWaveformForAsset: (assetId: string, filePath: string) => Promise<void>
   addLayer: (type?: TimelineLayer['type']) => void
   removeLayer: (layerId: string) => void
   toggleLayerMute: (layerId: string) => void
@@ -109,13 +118,17 @@ export const useVideoEditorStore = create<{
   undoStack: [],
   redoStack: [],
   durationMs: 1000,
+  waveformCache: {},
+  waveformLoading: {},
 
   resetProject: () =>
     set({
       project: createEmptyVideoEditorProject(),
       undoStack: [],
       redoStack: [],
-      durationMs: 1000
+      durationMs: 1000,
+      waveformCache: {},
+      waveformLoading: {}
     }),
 
   pushHistory: () => {
@@ -164,7 +177,38 @@ export const useVideoEditorStore = create<{
     set((state) => ({
       project: { ...state.project, assets: [...state.project.assets, asset] }
     }))
+    if (asset.type === 'audio' || asset.type === 'video') {
+      void get().loadWaveformForAsset(asset.id, asset.path)
+    }
     return asset
+  },
+
+  loadWaveformForAsset: async (assetId, filePath) => {
+    const { waveformCache, waveformLoading } = get()
+    if (waveformCache[assetId] || waveformLoading[assetId]) return
+    if (!window.electronAPI?.getAudioPeaks) return
+
+    set((state) => ({
+      waveformLoading: { ...state.waveformLoading, [assetId]: true }
+    }))
+
+    try {
+      const result = await window.electronAPI.getAudioPeaks(filePath)
+      set((state) => ({
+        waveformCache: {
+          ...state.waveformCache,
+          [assetId]: {
+            sampleRate: result.sampleRate,
+            peaks: normalizePeaks(result.peaks)
+          }
+        },
+        waveformLoading: { ...state.waveformLoading, [assetId]: false }
+      }))
+    } catch {
+      set((state) => ({
+        waveformLoading: { ...state.waveformLoading, [assetId]: false }
+      }))
+    }
   },
 
   addLayer: (type = 'video') => {
@@ -457,6 +501,7 @@ export const useVideoEditorStore = create<{
         durationMs: sequenceDurationMs(layers)
       }
     })
+    void get().loadWaveformForAsset(asset.id, asset.path)
   },
 
   clipsAtPlayhead: (timeMs) => {
