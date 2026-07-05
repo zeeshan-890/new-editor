@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Film,
   Layers,
@@ -40,10 +40,17 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
   const addClipToLayer = useVideoEditorStore((s) => s.addClipToLayer)
   const splitClipAtPlayhead = useVideoEditorStore((s) => s.splitClipAtPlayhead)
   const deleteSelectedClip = useVideoEditorStore((s) => s.deleteSelectedClip)
-  const selected = useVideoEditorStore((s) => {
-    if (!s.project.selectedClipId) return null
-    return s.getSelectedClip()
-  })
+  const selectedClipId = useVideoEditorStore((s) => s.project.selectedClipId)
+  const selected = useMemo(() => {
+    if (!selectedClipId) return null
+    for (const layer of project.layers) {
+      const clip = layer.clips.find((c) => c.id === selectedClipId)
+      if (!clip) continue
+      const asset = project.assets.find((a) => a.id === clip.assetId)
+      if (asset) return { clip, layer, asset }
+    }
+    return null
+  }, [selectedClipId, project.layers, project.assets])
   const visualClipAtPlayhead = useVideoEditorStore((s) => s.visualClipAtPlayhead)
   const audioClipAtPlayhead = useVideoEditorStore((s) => s.audioClipAtPlayhead)
 
