@@ -1,6 +1,24 @@
 import { app, BrowserWindow, Menu, shell, dialog, protocol } from 'electron'
 import { join } from 'path'
+import { IPC } from '../shared/ipc-channels'
 import { registerIpcHandlers, registerMenuIpc } from './ipc/handlers'
+import { getLogFilePath, getLogsDirectory, logInfo } from './logger'
+import { localProtocolFileCallback } from './localProtocol'
+
+const LOCAL_SCHEMES = ['local-audio', 'local-video', 'local-media'] as const
+
+protocol.registerSchemesAsPrivileged(
+  LOCAL_SCHEMES.map((scheme) => ({
+    scheme,
+    privileges: {
+      standard: true,
+      secure: true,
+      bypassCSP: true,
+      stream: true,
+      supportFetchAPI: true
+    }
+  }))
+)
 
 let mainWindow: BrowserWindow | null = null
 
@@ -15,7 +33,7 @@ function createWindow(): void {
     title: 'Silence Editor',
     icon: join(app.getAppPath(), 'resources', 'icon.svg'),
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: join(__dirname, '../preload/index.cjs'),
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false
@@ -104,8 +122,14 @@ function buildMenu(): void {
               type: 'info',
               title: 'About',
               message: 'Silence Editor v1.0.0',
-              detail: 'Professional AI silence removal audio editor.'
+              detail: `Professional AI silence removal audio editor.\n\nLogs folder:\n${getLogsDirectory()}\n\nToday's log:\n${getLogFilePath()}`
             })
+          }
+        },
+        {
+          label: 'Open Log File',
+          click: () => {
+            shell.showItemInFolder(getLogFilePath())
           }
         }
       ]
@@ -116,10 +140,21 @@ function buildMenu(): void {
 }
 
 app.whenReady().then(() => {
+  logInfo('app', 'Silence Editor started', {
+    logsDir: getLogsDirectory(),
+    logFile: getLogFilePath()
+  })
+
   protocol.registerFileProtocol('local-audio', (request, callback) => {
-    const url = request.url.replace('local-audio://', '')
-    const decoded = decodeURIComponent(url)
-    callback({ path: decoded })
+    localProtocolFileCallback(request.url, 'local-audio', callback)
+  })
+
+  protocol.registerFileProtocol('local-video', (request, callback) => {
+    localProtocolFileCallback(request.url, 'local-video', callback)
+  })
+
+  protocol.registerFileProtocol('local-media', (request, callback) => {
+    localProtocolFileCallback(request.url, 'local-media', callback)
   })
 
   registerIpcHandlers(() => mainWindow)
