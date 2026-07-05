@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Lock, LockOpen, Volume2, VolumeX } from 'lucide-react'
 import { useVideoEditorStore } from '@renderer/stores/videoEditorStore'
 import { usePlaybackStore } from '@renderer/stores/playbackStore'
@@ -42,6 +42,7 @@ export function VideoTimeline(): React.JSX.Element {
   const toggleLayerLock = useVideoEditorStore((s) => s.toggleLayerLock)
   const moveSelectedClip = useVideoEditorStore((s) => s.moveSelectedClip)
   const moveSelectedClipToPosition = useVideoEditorStore((s) => s.moveSelectedClipToPosition)
+  const peekSelectedClipDropTarget = useVideoEditorStore((s) => s.peekSelectedClipDropTarget)
   const trimSelectedClip = useVideoEditorStore((s) => s.trimSelectedClip)
   const pushHistory = useVideoEditorStore((s) => s.pushHistory)
 
@@ -57,6 +58,7 @@ export function VideoTimeline(): React.JSX.Element {
   const timelineContentRef = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(800)
   const [hoverLayerIndex, setHoverLayerIndex] = useState<number | null>(null)
+  const [isDraggingClip, setIsDraggingClip] = useState(false)
   const dragRef = useRef<{ clipId: string; startX: number; startY: number; startMs: number } | null>(
     null
   )
@@ -117,6 +119,46 @@ export function VideoTimeline(): React.JSX.Element {
     setScrollMs(Number(e.target.value))
   }
 
+  const draggingClipInfo = useMemo(() => {
+    if (!selectedClipId || !isDraggingClip) return null
+    for (let i = 0; i < layers.length; i++) {
+      const layer = layers[i]
+      const clip = layer.clips.find((c) => c.id === selectedClipId)
+      if (!clip) continue
+      const asset = assets.find((a) => a.id === clip.assetId)
+      if (!asset) return null
+      return { clip, asset, sourceLayerIndex: i }
+    }
+    return null
+  }, [selectedClipId, isDraggingClip, layers, assets])
+
+  const dropTarget =
+    isDraggingClip && hoverLayerIndex !== null
+      ? peekSelectedClipDropTarget(hoverLayerIndex)
+      : null
+
+  const ghostLayerIndex =
+    dropTarget && draggingClipInfo
+      ? dropTarget.createNew
+        ? dropTarget.insertIndex
+        : hoverLayerIndex
+      : null
+
+  const showGhost =
+    draggingClipInfo &&
+    ghostLayerIndex !== null &&
+    ghostLayerIndex !== draggingClipInfo.sourceLayerIndex
+
+  const ghostStyle = draggingClipInfo
+    ? LAYER_STYLE[
+        draggingClipInfo.asset.type === 'audio'
+          ? 'audio'
+          : draggingClipInfo.asset.type === 'image'
+            ? 'overlay'
+            : 'video'
+      ]
+    : null
+
   return (
     <div ref={containerRef} className="relative flex flex-col min-h-0 border-t border-border bg-card/30">
       <div
@@ -140,9 +182,10 @@ export function VideoTimeline(): React.JSX.Element {
           const style = LAYER_STYLE[layer.type]
           const isSelectedLayer = layer.id === selectedLayerId
           const isDropTarget =
-            hoverLayerIndex === layerIndex ||
-            (hoverLayerIndex === -1 && layerIndex === 0) ||
-            (hoverLayerIndex === layers.length && layerIndex === layers.length - 1)
+            hoverLayerIndex !== null &&
+            (hoverLayerIndex === layerIndex ||
+              (dropTarget?.createNew && dropTarget.insertIndex === layerIndex))
+          const showLayerGhost = showGhost && ghostLayerIndex === layerIndex && ghostStyle
           return (
           <div
             key={layer.id}
@@ -196,12 +239,39 @@ export function VideoTimeline(): React.JSX.Element {
                 setPlayheadMs(clamp(xToMs(e.nativeEvent.offsetX), 0, durationMs))
               }}
             >
+              {showLayerGhost && draggingClipInfo && ghostStyle && (
+                <div
+                  className={cn(
+                    'absolute top-1 bottom-1 rounded border-2 border-dashed pointer-events-none opacity-70 z-10',
+                    ghostStyle.clip
+                  )}
+                  style={{
+                    left: msToX(draggingClipInfo.clip.timelineStartMs),
+                    width: Math.max(
+                      24,
+                      msToX(
+                        draggingClipInfo.clip.timelineStartMs +
+                          clipDurationMs(draggingClipInfo.clip)
+                      ) - msToX(draggingClipInfo.clip.timelineStartMs)
+                    )
+                  }}
+                >
+                  <span className={cn('absolute left-1 top-0.5 text-[9px] truncate max-w-full', ghostStyle.label)}>
+                    {dropTarget?.createNew ? `New ${dropTarget.layerType} layer` : draggingClipInfo.asset.name}
+                  </span>
+                </div>
+              )}
               {layer.clips.map((clip) => {
                 const asset = assets.find((a) => a.id === clip.assetId)
                 if (!asset) return null
                 const left = msToX(clip.timelineStartMs)
                 const w = Math.max(24, msToX(clip.timelineStartMs + clipDurationMs(clip)) - left)
                 const selected = clip.id === selectedClipId
+                const isDragSource =
+                  isDraggingClip &&
+                  showGhost &&
+                  draggingClipInfo?.sourceLayerIndex === layerIndex &&
+                  selected
                 return (
                   <TimelineClipBlock
                     key={clip.id}
@@ -212,6 +282,7 @@ export function VideoTimeline(): React.JSX.Element {
                     width={w}
                     selected={selected}
                     style={style}
+                    className={isDragSource ? 'opacity-40' : undefined}
                     onMouseDown={(e) => {
                       if (layer.locked) return
                       e.stopPropagation()
@@ -224,6 +295,7 @@ export function VideoTimeline(): React.JSX.Element {
                         startY: e.clientY,
                         startMs: clip.timelineStartMs
                       }
+                      setIsDraggingClip(true)
                     }}
                     onTrimIn={(e) => {
                       e.stopPropagation()
@@ -241,6 +313,41 @@ export function VideoTimeline(): React.JSX.Element {
             </div>
           </div>
         )})}
+
+        {isDraggingClip && hoverLayerIndex === layers.length && dropTarget?.createNew && ghostStyle && draggingClipInfo && (
+          <div
+            className="flex border-b border-border/60 ring-1 ring-inset ring-primary/60 bg-primary/5"
+            style={{ height: LAYER_HEIGHT }}
+          >
+            <div
+              className={cn(
+                'shrink-0 px-1.5 flex items-center border-r border-border text-[10px]',
+                ghostStyle.bar,
+                ghostStyle.label
+              )}
+              style={{ width: TRACK_HEADER_W }}
+            >
+              New {dropTarget.layerType} layer
+            </div>
+            <div className={cn('relative flex-1 min-w-0', ghostStyle.bar)}>
+              <div
+                className={cn(
+                  'absolute top-1 bottom-1 rounded border-2 border-dashed pointer-events-none opacity-70',
+                  ghostStyle.clip
+                )}
+                style={{
+                  left: msToX(draggingClipInfo.clip.timelineStartMs),
+                  width: Math.max(
+                    24,
+                    msToX(
+                      draggingClipInfo.clip.timelineStartMs + clipDurationMs(draggingClipInfo.clip)
+                    ) - msToX(draggingClipInfo.clip.timelineStartMs)
+                  )
+                }}
+              />
+            </div>
+          </div>
+        )}
       </div>
 
       {maxScrollMs > 0 && (
@@ -276,6 +383,7 @@ export function VideoTimeline(): React.JSX.Element {
         moveSelectedClipToPosition={moveSelectedClipToPosition}
         trimSelectedClip={trimSelectedClip}
         setHoverLayerIndex={setHoverLayerIndex}
+        setIsDraggingClip={setIsDraggingClip}
         width={width}
         visibleDurationMs={visibleDurationMs}
       />
@@ -291,6 +399,7 @@ function GlobalDragHandler({
   moveSelectedClipToPosition,
   trimSelectedClip,
   setHoverLayerIndex,
+  setIsDraggingClip,
   width,
   visibleDurationMs
 }: {
@@ -306,6 +415,7 @@ function GlobalDragHandler({
   moveSelectedClipToPosition: (ms: number, visualLayerIndex: number) => void
   trimSelectedClip: (edge: 'in' | 'out', deltaMs: number) => void
   setHoverLayerIndex: (index: number | null) => void
+  setIsDraggingClip: (dragging: boolean) => void
   width: number
   visibleDurationMs: number
 }): null {
@@ -335,6 +445,7 @@ function GlobalDragHandler({
       dragRef.current = null
       trimRef.current = null
       setHoverLayerIndex(null)
+      setIsDraggingClip(false)
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
@@ -350,6 +461,7 @@ function GlobalDragHandler({
     moveSelectedClipToPosition,
     trimSelectedClip,
     setHoverLayerIndex,
+    setIsDraggingClip,
     width,
     visibleDurationMs
   ])

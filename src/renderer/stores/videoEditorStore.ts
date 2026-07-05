@@ -111,54 +111,29 @@ function createLayerOfType(type: TimelineLayer['type'], layers: TimelineLayer[])
   }
 }
 
-function compatibleLayerIndices(layers: TimelineLayer[], assetType: MediaAssetType): number[] {
-  return layers
-    .map((layer, index) => (isLayerCompatible(layer, assetType) && !layer.locked ? index : -1))
-    .filter((index) => index >= 0)
+export type ClipDropTarget = {
+  layerId: string | null
+  insertIndex: number
+  createNew: boolean
+  layerType: TimelineLayer['type']
 }
 
 function resolveDropTarget(
   layers: TimelineLayer[],
   assetType: MediaAssetType,
   visualIndex: number
-): { layerId: string | null; insertIndex: number; createNew: boolean; layerType: TimelineLayer['type'] } {
+): ClipDropTarget {
   const layerType = layerTypeForAsset(assetType)
-  const compatible = compatibleLayerIndices(layers, assetType)
+  const idx = clamp(visualIndex, 0, layers.length)
 
-  if (compatible.length === 0) {
-    const insertIndex = layerType === 'video' ? 0 : layers.length
-    return { layerId: null, insertIndex, createNew: true, layerType }
-  }
-
-  const first = compatible[0]
-  const last = compatible[compatible.length - 1]
-
-  if (visualIndex < first) {
-    return { layerId: null, insertIndex: first, createNew: true, layerType }
-  }
-
-  if (visualIndex > last) {
-    return { layerId: null, insertIndex: last + 1, createNew: true, layerType }
-  }
-
-  if (isLayerCompatible(layers[visualIndex], assetType) && !layers[visualIndex].locked) {
-    return {
-      layerId: layers[visualIndex].id,
-      insertIndex: visualIndex,
-      createNew: false,
-      layerType
+  if (idx < layers.length) {
+    const row = layers[idx]
+    if (!row.locked && isLayerCompatible(row, assetType)) {
+      return { layerId: row.id, insertIndex: idx, createNew: false, layerType }
     }
   }
 
-  const nearest = compatible.reduce((best, index) =>
-    Math.abs(index - visualIndex) < Math.abs(best - visualIndex) ? index : best
-  )
-  return {
-    layerId: layers[nearest].id,
-    insertIndex: nearest,
-    createNew: false,
-    layerType
-  }
+  return { layerId: null, insertIndex: idx, createNew: true, layerType }
 }
 
 export const useVideoEditorStore = create<{
@@ -196,6 +171,7 @@ export const useVideoEditorStore = create<{
   deleteSelectedClip: () => void
   moveSelectedClip: (timelineStartMs: number) => void
   moveSelectedClipToPosition: (timelineStartMs: number, visualLayerIndex: number) => void
+  peekSelectedClipDropTarget: (visualLayerIndex: number) => ClipDropTarget | null
   replaceClipWithAsset: (clipId: string, assetInput: Omit<MediaAsset, 'id'>) => void
   clipsAtPlayhead: (timeMs: number) => Array<{ clip: TimelineClip; layer: TimelineLayer; asset: MediaAsset }>
   getSelectedClip: () => { clip: TimelineClip; layer: TimelineLayer; asset: MediaAsset } | null
@@ -635,6 +611,26 @@ export const useVideoEditorStore = create<{
 
   moveSelectedClip: (timelineStartMs) => {
     get().moveSelectedClipToPosition(timelineStartMs, -1)
+  },
+
+  peekSelectedClipDropTarget: (visualLayerIndex) => {
+    const { project } = get()
+    const clipId = project.selectedClipId
+    if (!clipId) return null
+
+    let asset: MediaAsset | undefined
+    let sourceLayer: TimelineLayer | undefined
+
+    for (const layer of project.layers) {
+      const hit = layer.clips.find((c) => c.id === clipId)
+      if (!hit) continue
+      asset = project.assets.find((a) => a.id === hit.assetId)
+      sourceLayer = layer
+      break
+    }
+
+    if (!asset || !sourceLayer || sourceLayer.locked) return null
+    return resolveDropTarget(project.layers, asset.type, visualLayerIndex)
   },
 
   moveSelectedClipToPosition: (timelineStartMs, visualLayerIndex) => {

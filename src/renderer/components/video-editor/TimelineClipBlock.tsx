@@ -15,6 +15,7 @@ interface TimelineClipBlockProps {
   width: number
   selected: boolean
   style: { bar: string; clip: string; label: string }
+  className?: string
   onMouseDown: (e: React.MouseEvent) => void
   onTrimIn: (e: React.MouseEvent) => void
   onTrimOut: (e: React.MouseEvent) => void
@@ -38,6 +39,7 @@ export function TimelineClipBlock({
   width,
   selected,
   style,
+  className,
   onMouseDown,
   onTrimIn,
   onTrimOut
@@ -76,7 +78,8 @@ export function TimelineClipBlock({
         layer.locked ? 'cursor-not-allowed opacity-70' : 'cursor-grab active:cursor-grabbing',
         selected ? 'border-primary ring-1 ring-primary' : style.clip,
         showWaveform && waveform && 'bg-emerald-950/40',
-        showFilmstrip && filmstrip && 'bg-sky-950/40'
+        showFilmstrip && filmstrip && 'bg-sky-950/40',
+        className
       )}
       style={{ left, width }}
       onMouseDown={onMouseDown}
