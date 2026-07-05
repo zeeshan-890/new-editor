@@ -3,8 +3,8 @@ import { Button } from '../common/Button'
 import { Label } from '../common/Label'
 import { Slider } from '../common/Slider'
 import { Select } from '../common/Select'
-import { useVideoEditorStore } from '@renderer/stores/videoEditorStore'
-import type { DetectionMode, DetectionParams, SilenceRegion } from '@shared/types'
+import { useVideoEditorStore, EMPTY_SILENCE_REGIONS } from '@renderer/stores/videoEditorStore'
+import type { DetectionMode, DetectionParams } from '@shared/types'
 import { DEFAULT_DETECTION_PARAMS, generateId } from '@shared/types'
 
 interface VideoAudioSilencePanelProps {
@@ -19,8 +19,16 @@ export function VideoAudioSilencePanel({
   onError
 }: VideoAudioSilencePanelProps): React.JSX.Element {
   const replaceClipWithAsset = useVideoEditorStore((s) => s.replaceClipWithAsset)
-  const [params, setParams] = useState<DetectionParams>({ ...DEFAULT_DETECTION_PARAMS })
-  const [regions, setRegions] = useState<SilenceRegion[]>([])
+  const setClipSilenceRegions = useVideoEditorStore((s) => s.setClipSilenceRegions)
+  const clearClipSilenceRegions = useVideoEditorStore((s) => s.clearClipSilenceRegions)
+  const regions = useVideoEditorStore(
+    (s) => s.silenceRegionsByClipId[clipId] ?? EMPTY_SILENCE_REGIONS
+  )
+  const [params, setParams] = useState<DetectionParams>({
+    ...DEFAULT_DETECTION_PARAMS,
+    prePaddingMs: 0,
+    postPaddingMs: 0
+  })
   const [detecting, setDetecting] = useState(false)
   const [processing, setProcessing] = useState(false)
 
@@ -31,13 +39,13 @@ export function VideoAudioSilencePanel({
     try {
       await window.electronAPI.loadAudio(assetPath)
       const result = await window.electronAPI.detectSilence(params)
-      setRegions(result.regions)
+      setClipSilenceRegions(clipId, result.regions)
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err))
     } finally {
       setDetecting(false)
     }
-  }, [assetPath, onError, params])
+  }, [assetPath, clipId, onError, params, setClipSilenceRegions])
 
   const removeSilence = useCallback(async (): Promise<void> => {
     if (!window.electronAPI?.exportAudioTemp || !window.electronAPI.probeMediaFile) return
@@ -50,7 +58,7 @@ export function VideoAudioSilencePanel({
       if (activeRegions.length === 0) {
         const result = await window.electronAPI.detectSilence(params)
         activeRegions = result.regions
-        setRegions(activeRegions)
+        setClipSilenceRegions(clipId, activeRegions)
       }
 
       const ops = activeRegions
@@ -75,13 +83,13 @@ export function VideoAudioSilencePanel({
         type: 'audio',
         durationMs: meta.durationMs
       })
-      setRegions([])
+      clearClipSilenceRegions(clipId)
     } catch (err) {
       onError(err instanceof Error ? err.message : String(err))
     } finally {
       setProcessing(false)
     }
-  }, [assetPath, clipId, onError, params, regions, replaceClipWithAsset])
+  }, [assetPath, clipId, clearClipSilenceRegions, onError, params, regions, replaceClipWithAsset, setClipSilenceRegions])
 
   const silenceMs = regions.filter((r) => !r.removed).reduce((sum, r) => sum + (r.endMs - r.startMs), 0)
 
