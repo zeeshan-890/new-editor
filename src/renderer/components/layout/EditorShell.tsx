@@ -4,14 +4,17 @@ import { Timeline } from '../timeline/Timeline'
 import { TransportBar } from '../transport/TransportBar'
 import { DetectionPanel } from '../inspector/DetectionPanel'
 import { ExportPanel } from '../inspector/ExportPanel'
+import { InspectorTabs, type InspectorTab } from '../inspector/InspectorTabs'
 import { Dialog, DialogRow } from '../common/Dialog'
 import { useEditorStore } from '@renderer/stores/editorStore'
 import { usePlaybackStore } from '@renderer/stores/playbackStore'
 import { useAudioPlayer, useKeyboardShortcuts } from '@renderer/hooks/useKeyboardShortcuts'
+import { localAudioPathUrl } from '@renderer/lib/localFileProtocol'
 
-export function EditorShell(): React.JSX.Element {
+export function EditorShell({ embedded = false }: { embedded?: boolean }): React.JSX.Element {
   const playerRef = useAudioPlayer()
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('silence')
 
   const setMetadata = useEditorStore((s) => s.setMetadata)
   const setPeaks = useEditorStore((s) => s.setPeaks)
@@ -25,6 +28,7 @@ export function EditorShell(): React.JSX.Element {
   const exportFormat = useEditorStore((s) => s.exportFormat)
   const exportBitrate = useEditorStore((s) => s.exportBitrate)
   const previewNonSilence = useEditorStore((s) => s.previewNonSilence)
+  const metadata = useEditorStore((s) => s.metadata)
 
   const setPlayheadMs = usePlaybackStore((s) => s.setPlayheadMs)
   const setIsPlaying = usePlaybackStore((s) => s.setIsPlaying)
@@ -43,7 +47,7 @@ export function EditorShell(): React.JSX.Element {
         setPeaks(project.peaks)
         addRecentFile(filePath)
 
-        const previewUrl = `local-audio://${encodeURIComponent(project.metadata.previewPath)}`
+        const previewUrl = localAudioPathUrl(project.metadata.previewPath)
         const player = playerRef.current
         if (player) {
           await player.loadFromUrl(previewUrl)
@@ -153,23 +157,28 @@ export function EditorShell(): React.JSX.Element {
   )
 
   return (
-    <div className="h-screen flex flex-col bg-background text-foreground">
-      <header className="h-10 border-b border-border flex items-center px-4 shrink-0 bg-card">
-        <span className="font-semibold text-sm tracking-tight">Silence Editor</span>
-        <span className="ml-2 text-[10px] text-muted uppercase">AI Silence Removal</span>
-      </header>
+    <div className={embedded ? 'flex-1 flex flex-col min-h-0 bg-background text-foreground' : 'h-screen flex flex-col bg-background text-foreground'}>
+      {!embedded && (
+        <header className="h-10 border-b border-border flex items-center px-4 shrink-0 bg-card">
+          <span className="font-semibold text-sm tracking-tight">Silence Editor</span>
+          <span className="ml-2 text-[10px] text-muted uppercase">AI Silence Removal</span>
+        </header>
+      )}
 
       <div className="flex-1 flex min-h-0">
         <Sidebar onOpenFile={handleOpen} onDropFile={loadFile} />
 
-        <main className="flex-1 flex flex-col min-w-0">
+        <main className="flex-1 flex flex-col min-w-0 min-h-0">
           <Timeline onSeek={handleSeek} />
           <TransportBar onPlayPause={handlePlayPause} onStop={handleStop} />
         </main>
 
         <aside className="w-72 border-l border-border bg-card flex flex-col shrink-0 min-h-0">
-          <DetectionPanel />
-          <ExportPanel onExport={handleExport} />
+          <InspectorTabs active={inspectorTab} onChange={setInspectorTab} editorOnly />
+          <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+            {inspectorTab === 'silence' && <DetectionPanel />}
+            {inspectorTab === 'export' && <ExportPanel onExport={handleExport} />}
+          </div>
         </aside>
       </div>
 
