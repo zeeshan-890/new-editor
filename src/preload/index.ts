@@ -17,14 +17,15 @@ import type {
   HiggsfieldVoice,
   HiggsfieldWorkspace,
   LoadedAudioProject,
-  WaveformPeaks,
   Preset,
   AppSession,
   AppTab,
   GenerationProject,
   ProjectSummary,
   MediaAsset,
-  TimelineLayer
+  TimelineLayer,
+  VideoFilmstrip,
+  WaveformPeaks
 } from '../shared/types'
 
 export interface ElectronAPI {
@@ -32,7 +33,7 @@ export interface ElectronAPI {
   openImageFile: () => Promise<string | null>
   saveFile: (defaultName: string) => Promise<string | null>
   loadAudio: (filePath: string) => Promise<LoadedAudioProject>
-  getAudioPeaks: (filePath: string) => Promise<{ sampleRate: number; peaks: WaveformPeaks }>
+  getAudioPeaks: (filePath: string) => Promise<{ sampleRate: number; peaks: WaveformPeaks; durationMs: number }>
   detectSilence: (params: DetectionParams) => Promise<DetectionResult>
   exportAudio: (
     operations: EditOperation[],
@@ -85,6 +86,11 @@ export interface ElectronAPI {
   saveSession: (session: AppSession) => Promise<boolean>
   openVideoFile: () => Promise<string[]>
   probeMediaFile: (filePath: string) => Promise<Omit<MediaAsset, 'id'>>
+  getVideoFilmstrip: (payload: {
+    filePath: string
+    durationMs: number
+    type: MediaAsset['type']
+  }) => Promise<VideoFilmstrip>
   exportVideoSequence: (payload: {
     assets: MediaAsset[]
     layers: TimelineLayer[]
@@ -173,6 +179,7 @@ const api: ElectronAPI = {
   saveSession: (session) => ipcRenderer.invoke(IPC.SESSION_SAVE, session),
   openVideoFile: () => ipcRenderer.invoke(IPC.OPEN_VIDEO_FILE),
   probeMediaFile: (filePath) => ipcRenderer.invoke(IPC.VIDEO_PROBE, filePath),
+  getVideoFilmstrip: (payload) => ipcRenderer.invoke(IPC.VIDEO_FILMSTRIP, payload),
   exportVideoSequence: (payload) => ipcRenderer.invoke(IPC.VIDEO_EXPORT, payload),
   saveMediaAs: (payload) => ipcRenderer.invoke(IPC.MEDIA_SAVE_AS, payload)
 }
