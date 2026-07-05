@@ -15,9 +15,11 @@ import type {
   AppSession,
   GenerationProject,
   MediaAsset,
-  TimelineLayer
+  TimelineLayer,
+  WaveformPeaks
 } from '../../shared/types'
 import { decodeAudio, serializePeaks } from '../audio/decode'
+import { generatePeaksFromAudioFile } from '../audio/peaks-from-file'
 import { exportAudio } from '../audio/export'
 import { applyPaddingToRegions, mergeOverlappingRegions } from '../audio/apply-silence'
 import { detectTraditionalSilence } from '../detection/traditional'
@@ -246,6 +248,12 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       peaks: serializePeaks(peaks)
     }
   })
+
+  ipcMain.handle(
+    IPC.AUDIO_PEAKS,
+    async (_e, filePath: string): Promise<{ sampleRate: number; peaks: WaveformPeaks }> =>
+      generatePeaksFromAudioFile(filePath)
+  )
 
   ipcMain.handle(
     IPC.DETECT_SILENCE,
