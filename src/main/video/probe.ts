@@ -2,6 +2,7 @@ import { spawn } from 'child_process'
 import { existsSync } from 'fs'
 import { extname, basename } from 'path'
 import { FFMPEG_PATH } from '../audio/ffmpeg-path'
+import { parseFfmpegDurationMs } from '../media/duration'
 import type { MediaAsset, MediaAssetType } from '../../shared/types'
 
 const FFMPEG = FFMPEG_PATH
@@ -26,15 +27,12 @@ function probeDuration(filePath: string): Promise<number> {
       stderr += chunk.toString()
     })
     proc.on('close', () => {
-      const match = stderr.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d{2})/)
-      if (!match) {
+      const durationMs = parseFfmpegDurationMs(stderr)
+      if (durationMs == null) {
         resolve(5000)
         return
       }
-      const hours = parseInt(match[1], 10)
-      const minutes = parseInt(match[2], 10)
-      const seconds = parseFloat(match[3])
-      resolve((hours * 3600 + minutes * 60 + seconds) * 1000)
+      resolve(durationMs)
     })
     proc.on('error', reject)
   })
