@@ -2,11 +2,11 @@ import { spawn } from 'child_process'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join, extname, basename } from 'path'
-import ffmpegStatic from 'ffmpeg-static'
+import { FFMPEG_PATH } from './ffmpeg-path'
 import type { AudioMetadata, WaveformPeaks } from '../../shared/types'
 import { generatePeaksFromPcm } from './peaks'
 
-const FFMPEG = ffmpegStatic as string
+const FFMPEG = FFMPEG_PATH
 
 function runFfmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {

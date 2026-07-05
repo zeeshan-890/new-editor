@@ -2,10 +2,10 @@ import { spawn } from 'child_process'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import ffmpegStatic from 'ffmpeg-static'
+import { FFMPEG_PATH } from './ffmpeg-path'
 import type { EditOperation, ExportOptions, ExportResult } from '../../shared/types'
 
-const FFMPEG = ffmpegStatic as string
+const FFMPEG = FFMPEG_PATH
 
 function runFfmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
