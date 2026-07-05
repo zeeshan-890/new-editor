@@ -45,6 +45,7 @@ export const IPC = {
   SESSION_SAVE: 'session:save',
   OPEN_VIDEO_FILE: 'dialog:open-video',
   VIDEO_PROBE: 'video:probe',
+  VIDEO_FILMSTRIP: 'video:filmstrip',
   VIDEO_EXPORT: 'video:export',
   MEDIA_SAVE_AS: 'media:save-as'
 } as const
