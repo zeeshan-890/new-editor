@@ -9,6 +9,10 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'src/main/index.ts')
+        },
+        output: {
+          format: 'cjs',
+          entryFileNames: 'index.cjs'
         }
       }
     }
@@ -22,7 +26,7 @@ export default defineConfig({
         },
         output: {
           format: 'cjs',
-          entryFileNames: 'index.js'
+          entryFileNames: 'index.cjs'
         }
       }
     }
@@ -33,6 +37,9 @@ export default defineConfig({
         '@renderer': resolve('src/renderer'),
         '@shared': resolve('src/shared')
       }
+    },
+    server: {
+      strictPort: true
     },
     plugins: [react()]
   }
