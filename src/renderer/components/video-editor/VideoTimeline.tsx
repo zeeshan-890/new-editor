@@ -4,11 +4,13 @@ import { useVideoEditorStore } from '@renderer/stores/videoEditorStore'
 import { usePlaybackStore } from '@renderer/stores/playbackStore'
 import { clipDurationMs } from '@shared/types'
 import { localMediaPathUrl } from '@renderer/lib/localFileProtocol'
-import { clamp, cn, formatTime } from '@renderer/lib/utils'
+import { clamp, cn } from '@renderer/lib/utils'
 import { TimelineClipBlock } from './TimelineClipBlock'
+import { VideoTimeRuler } from './VideoTimeRuler'
 
 const LAYER_HEIGHT = 56
 const TRACK_HEADER_W = 140
+const RULER_HEIGHT = 24
 
 const LAYER_STYLE: Record<string, { bar: string; clip: string; label: string }> = {
   video: {
@@ -39,6 +41,7 @@ export function VideoTimeline(): React.JSX.Element {
   const toggleLayerMute = useVideoEditorStore((s) => s.toggleLayerMute)
   const toggleLayerLock = useVideoEditorStore((s) => s.toggleLayerLock)
   const moveSelectedClip = useVideoEditorStore((s) => s.moveSelectedClip)
+  const moveSelectedClipToPosition = useVideoEditorStore((s) => s.moveSelectedClipToPosition)
   const trimSelectedClip = useVideoEditorStore((s) => s.trimSelectedClip)
   const pushHistory = useVideoEditorStore((s) => s.pushHistory)
 
@@ -50,20 +53,38 @@ export function VideoTimeline(): React.JSX.Element {
   const setZoom = usePlaybackStore((s) => s.setZoom)
 
   const containerRef = useRef<HTMLDivElement>(null)
+  const tracksScrollRef = useRef<HTMLDivElement>(null)
+  const timelineContentRef = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(800)
-  const dragRef = useRef<{ clipId: string; startX: number; startMs: number } | null>(null)
+  const [hoverLayerIndex, setHoverLayerIndex] = useState<number | null>(null)
+  const dragRef = useRef<{ clipId: string; startX: number; startY: number; startMs: number } | null>(
+    null
+  )
   const trimRef = useRef<{ edge: 'in' | 'out'; startX: number } | null>(null)
 
+  const layerIndexFromClientY = useCallback(
+    (clientY: number): number => {
+      const container = tracksScrollRef.current
+      if (!container) return 0
+      const rect = container.getBoundingClientRect()
+      const contentY = clientY - rect.top + container.scrollTop - RULER_HEIGHT
+      if (contentY < 0) return -1
+      return clamp(Math.floor(contentY / LAYER_HEIGHT), 0, layers.length)
+    },
+    [layers.length]
+  )
+
   useEffect(() => {
-    const el = containerRef.current
+    const el = timelineContentRef.current
     if (!el) return
-    const ro = new ResizeObserver(() => setWidth(el.clientWidth - TRACK_HEADER_W))
+    const ro = new ResizeObserver(() => setWidth(el.clientWidth))
     ro.observe(el)
-    setWidth(el.clientWidth - TRACK_HEADER_W)
+    setWidth(el.clientWidth)
     return () => ro.disconnect()
   }, [])
 
   const visibleDurationMs = durationMs / zoom
+  const maxScrollMs = Math.max(0, durationMs - visibleDurationMs)
   const msToX = useCallback(
     (ms: number) => ((ms - scrollMs) / visibleDurationMs) * width,
     [scrollMs, visibleDurationMs, width]
@@ -76,39 +97,61 @@ export function VideoTimeline(): React.JSX.Element {
   const onWheel = (e: React.WheelEvent): void => {
     e.preventDefault()
     if (e.ctrlKey) {
-      setZoom(clamp(zoom * (e.deltaY > 0 ? 0.9 : 1.1), 0.05, 50))
-    } else {
-      const deltaMs = (e.deltaY / width) * visibleDurationMs
-      setScrollMs(clamp(scrollMs + deltaMs, 0, Math.max(0, durationMs - visibleDurationMs)))
+      const rect = timelineContentRef.current?.getBoundingClientRect()
+      const cursorX = rect && width > 0 ? clamp(e.clientX - rect.left, 0, width) : width / 2
+      const cursorMs = scrollMs + (cursorX / width) * visibleDurationMs
+      const nextZoom = clamp(zoom * (e.deltaY > 0 ? 0.9 : 1.1), 0.05, 50)
+      const nextVisible = durationMs / nextZoom
+      const nextMaxScroll = Math.max(0, durationMs - nextVisible)
+      const nextScroll = clamp(cursorMs - (cursorX / width) * nextVisible, 0, nextMaxScroll)
+      setZoom(nextZoom)
+      setScrollMs(nextScroll)
+      return
     }
+    const deltaPx = e.deltaX !== 0 ? e.deltaX : e.deltaY
+    const deltaMs = width > 0 ? (deltaPx / width) * visibleDurationMs : 0
+    setScrollMs(clamp(scrollMs + deltaMs, 0, maxScrollMs))
+  }
+
+  const onScrollBar = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    setScrollMs(Number(e.target.value))
   }
 
   return (
     <div ref={containerRef} className="relative flex flex-col min-h-0 border-t border-border bg-card/30">
-      <div className="flex shrink-0 border-b border-border">
-        <div style={{ width: TRACK_HEADER_W }} className="shrink-0" />
-        <div className="flex-1 min-w-0 h-6 relative text-[10px] text-muted" onWheel={onWheel}>
-          {Array.from({ length: 12 }).map((_, i) => {
-            const ms = scrollMs + (i / 12) * visibleDurationMs
-            return (
-              <span
-                key={i}
-                className="absolute top-1 -translate-x-1/2 tabular-nums"
-                style={{ left: `${(i / 12) * 100}%` }}
-              >
-                {formatTime(ms, false)}
-              </span>
-            )
-          })}
+      <div
+        ref={tracksScrollRef}
+        className="relative flex-1 overflow-y-auto min-h-0 [scrollbar-gutter:stable]"
+        onWheel={onWheel}
+      >
+        <div className="sticky top-0 z-10 flex shrink-0 border-b border-border bg-card/30">
+          <div style={{ width: TRACK_HEADER_W }} className="shrink-0" />
+          <div ref={timelineContentRef} className="flex-1 min-w-0">
+            <VideoTimeRuler
+              width={width}
+              scrollMs={scrollMs}
+              visibleDurationMs={visibleDurationMs}
+              msToX={msToX}
+            />
+          </div>
         </div>
-      </div>
 
-      <div className="relative flex-1 overflow-y-auto min-h-0" onWheel={onWheel}>
-        {layers.map((layer) => {
+        {layers.map((layer, layerIndex) => {
           const style = LAYER_STYLE[layer.type]
           const isSelectedLayer = layer.id === selectedLayerId
+          const isDropTarget =
+            hoverLayerIndex === layerIndex ||
+            (hoverLayerIndex === -1 && layerIndex === 0) ||
+            (hoverLayerIndex === layers.length && layerIndex === layers.length - 1)
           return (
-          <div key={layer.id} className="flex border-b border-border/60" style={{ height: LAYER_HEIGHT }}>
+          <div
+            key={layer.id}
+            className={cn(
+              'flex border-b border-border/60',
+              isDropTarget && 'ring-1 ring-inset ring-primary/60 bg-primary/5'
+            )}
+            style={{ height: LAYER_HEIGHT }}
+          >
             <div
               className={cn(
                 'shrink-0 px-1.5 flex flex-col justify-center gap-0.5 border-r border-border',
@@ -178,6 +221,7 @@ export function VideoTimeline(): React.JSX.Element {
                       dragRef.current = {
                         clipId: clip.id,
                         startX: e.clientX,
+                        startY: e.clientY,
                         startMs: clip.timelineStartMs
                       }
                     }}
@@ -199,6 +243,22 @@ export function VideoTimeline(): React.JSX.Element {
         )})}
       </div>
 
+      {maxScrollMs > 0 && (
+        <div className="flex shrink-0 border-t border-border bg-card/50 py-1">
+          <div style={{ width: TRACK_HEADER_W }} className="shrink-0" />
+          <input
+            type="range"
+            min={0}
+            max={maxScrollMs}
+            step={Math.max(1, Math.round(maxScrollMs / 500))}
+            value={scrollMs}
+            onChange={onScrollBar}
+            className="flex-1 min-w-0 mx-2 h-2 accent-primary cursor-pointer"
+            aria-label="Timeline horizontal scroll"
+          />
+        </div>
+      )}
+
       <div
         className="pointer-events-none absolute z-20 w-0.5 bg-white shadow-[0_0_6px_rgba(255,255,255,0.8)]"
         style={{
@@ -211,10 +271,11 @@ export function VideoTimeline(): React.JSX.Element {
       <GlobalDragHandler
         dragRef={dragRef}
         trimRef={trimRef}
-        xToMs={xToMs}
-        msToX={msToX}
+        layerIndexFromClientY={layerIndexFromClientY}
         moveSelectedClip={moveSelectedClip}
+        moveSelectedClipToPosition={moveSelectedClipToPosition}
         trimSelectedClip={trimSelectedClip}
+        setHoverLayerIndex={setHoverLayerIndex}
         width={width}
         visibleDurationMs={visibleDurationMs}
       />
@@ -225,18 +286,26 @@ export function VideoTimeline(): React.JSX.Element {
 function GlobalDragHandler({
   dragRef,
   trimRef,
-  xToMs,
+  layerIndexFromClientY,
   moveSelectedClip,
+  moveSelectedClipToPosition,
   trimSelectedClip,
+  setHoverLayerIndex,
   width,
   visibleDurationMs
 }: {
-  dragRef: React.MutableRefObject<{ clipId: string; startX: number; startMs: number } | null>
+  dragRef: React.MutableRefObject<{
+    clipId: string
+    startX: number
+    startY: number
+    startMs: number
+  } | null>
   trimRef: React.MutableRefObject<{ edge: 'in' | 'out'; startX: number } | null>
-  xToMs: (x: number) => number
-  msToX: (ms: number) => number
+  layerIndexFromClientY: (clientY: number) => number
   moveSelectedClip: (ms: number) => void
+  moveSelectedClipToPosition: (ms: number, visualLayerIndex: number) => void
   trimSelectedClip: (edge: 'in' | 'out', deltaMs: number) => void
+  setHoverLayerIndex: (index: number | null) => void
   width: number
   visibleDurationMs: number
 }): null {
@@ -246,6 +315,7 @@ function GlobalDragHandler({
         const deltaPx = e.clientX - dragRef.current.startX
         const deltaMs = (deltaPx / width) * visibleDurationMs
         moveSelectedClip(Math.max(0, dragRef.current.startMs + deltaMs))
+        setHoverLayerIndex(layerIndexFromClientY(e.clientY))
       }
       if (trimRef.current) {
         const deltaPx = e.clientX - trimRef.current.startX
@@ -254,9 +324,17 @@ function GlobalDragHandler({
         trimRef.current.startX = e.clientX
       }
     }
-    const onUp = (): void => {
+    const onUp = (e: MouseEvent): void => {
+      if (dragRef.current) {
+        const deltaPx = e.clientX - dragRef.current.startX
+        const deltaMs = (deltaPx / width) * visibleDurationMs
+        const timelineStartMs = Math.max(0, dragRef.current.startMs + deltaMs)
+        const layerIndex = layerIndexFromClientY(e.clientY)
+        moveSelectedClipToPosition(timelineStartMs, layerIndex)
+      }
       dragRef.current = null
       trimRef.current = null
+      setHoverLayerIndex(null)
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
@@ -264,7 +342,17 @@ function GlobalDragHandler({
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
-  }, [dragRef, trimRef, moveSelectedClip, trimSelectedClip, width, visibleDurationMs, xToMs])
+  }, [
+    dragRef,
+    trimRef,
+    layerIndexFromClientY,
+    moveSelectedClip,
+    moveSelectedClipToPosition,
+    trimSelectedClip,
+    setHoverLayerIndex,
+    width,
+    visibleDurationMs
+  ])
 
   return null
 }
