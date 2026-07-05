@@ -1,7 +1,9 @@
 node_modules
 dist
 out
+logs
 *.log
+*.tsbuildinfo
 .DS_Store
 Thumbs.db
 test-audio.wav
