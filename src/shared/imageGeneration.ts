@@ -8,7 +8,7 @@ import type {
   ProjectMedia,
   TabComposerState
 } from './types'
-import { activeModeDraft } from './types'
+import { activeModeDraft, DEFAULT_ASPECT_RATIO } from './types'
 
 export function buildEffectivePrompt(
   prompt: string,
@@ -62,7 +62,8 @@ export function buildComposerSnapshot(
     model: draft.model,
     imageAttachments: cloneProjectMediaList(draft.imageAttachments),
     videoStartFrame: draft.videoStartFrame ? cloneProjectMedia(draft.videoStartFrame) : null,
-    videoDuration: draft.videoDuration
+    videoDuration: draft.videoDuration,
+    aspectRatio: draft.aspectRatio
   }
 }
 
@@ -98,7 +99,10 @@ export function buildImageGenerationRequest(
     category: mode,
     references,
     projectId: input.projectId,
-    params: mode === 'video' ? { duration: String(draft.videoDuration) } : {},
+    params: {
+      aspect_ratio: draft.aspectRatio,
+      ...(mode === 'video' ? { duration: String(draft.videoDuration) } : {})
+    },
     mediaPath: mode === 'video' ? draft.videoStartFrame?.localPath : undefined,
     mediaFlag: mode === 'video' && draft.videoStartFrame ? 'start-image' : undefined,
     wait: true,
@@ -145,6 +149,7 @@ export function generationToModeDraft(generation: ProjectGeneration): Generation
       ? generation.imageAttachments.map(cloneProjectMedia)
       : [],
     videoStartFrame: generation.videoStartFrame ? cloneProjectMedia(generation.videoStartFrame) : null,
-    videoDuration: generation.videoDuration ?? 5
+    videoDuration: generation.videoDuration ?? 5,
+    aspectRatio: generation.aspectRatio ?? DEFAULT_ASPECT_RATIO
   }
 }

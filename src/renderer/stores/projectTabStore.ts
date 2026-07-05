@@ -469,7 +469,8 @@ export const useProjectTabStore = create<{
           ? config.imageAttachments.map((m) => ({ ...m }))
           : undefined,
         videoStartFrame: config?.videoStartFrame ? { ...config.videoStartFrame } : undefined,
-        videoDuration: config?.videoDuration
+        videoDuration: config?.videoDuration,
+        aspectRatio: config?.aspectRatio
       }
       get().addProjectGeneration(projectId, generation)
       if (window.electronAPI?.ensureGenerationMedia) {

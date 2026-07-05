@@ -276,6 +276,7 @@ export interface ProjectGeneration {
   imageAttachments?: ProjectMedia[]
   videoStartFrame?: ProjectMedia | null
   videoDuration?: number
+  aspectRatio?: string
 }
 
 /** Composer fields saved per mode within a tab (image vs video stay isolated). */
@@ -287,6 +288,7 @@ export interface GenerationModeDraft {
   imageAttachments: ProjectMedia[]
   videoStartFrame: ProjectMedia | null
   videoDuration: number
+  aspectRatio: string
 }
 
 export interface TabComposerState {
@@ -305,6 +307,7 @@ export interface GenerationComposerSnapshot {
   imageAttachments: ProjectMedia[]
   videoStartFrame: ProjectMedia | null
   videoDuration: number
+  aspectRatio: string
 }
 
 export interface GenerationProject {
@@ -357,6 +360,22 @@ export const APP_SESSION_VERSION = 3
 
 export const DEFAULT_IMAGE_MODEL = 'nano_banana_2'
 export const DEFAULT_VIDEO_MODEL = 'kling3_0'
+export const DEFAULT_ASPECT_RATIO = '9:16'
+
+export const IMAGE_ASPECT_RATIOS = [
+  '9:16',
+  '16:9',
+  '1:1',
+  '4:5',
+  '5:4',
+  '3:4',
+  '4:3',
+  '2:3',
+  '3:2',
+  '21:9'
+] as const
+
+export const VIDEO_ASPECT_RATIOS = ['9:16', '16:9', '1:1'] as const
 
 export type MediaAssetType = 'video' | 'image' | 'audio'
 
@@ -455,7 +474,8 @@ export function createEmptyModeDraft(mode: GenerationMode): GenerationModeDraft 
     model: mode === 'image' ? DEFAULT_IMAGE_MODEL : DEFAULT_VIDEO_MODEL,
     imageAttachments: [],
     videoStartFrame: null,
-    videoDuration: 5
+    videoDuration: 5,
+    aspectRatio: DEFAULT_ASPECT_RATIO
   }
 }
 
@@ -482,15 +502,17 @@ export function normalizeTabComposerState(state: TabComposerState | undefined): 
   return {
     activeMode: state.activeMode === 'video' ? 'video' : 'image',
     selectedGenerationId: state.selectedGenerationId ?? null,
-    image: {
-      ...empty.image,
-      ...state.image,
-      imageAttachments: state.image?.imageAttachments ?? []
-    },
     video: {
       ...empty.video,
       ...state.video,
-      videoStartFrame: state.video?.videoStartFrame ?? null
+      videoStartFrame: state.video?.videoStartFrame ?? null,
+      aspectRatio: state.video?.aspectRatio ?? DEFAULT_ASPECT_RATIO
+    },
+    image: {
+      ...empty.image,
+      ...state.image,
+      imageAttachments: state.image?.imageAttachments ?? [],
+      aspectRatio: state.image?.aspectRatio ?? DEFAULT_ASPECT_RATIO
     }
   }
 }

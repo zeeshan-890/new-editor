@@ -39,6 +39,9 @@ import {
   createEmptyTabComposerState,
   DEFAULT_IMAGE_MODEL,
   DEFAULT_VIDEO_MODEL,
+  DEFAULT_ASPECT_RATIO,
+  IMAGE_ASPECT_RATIOS,
+  VIDEO_ASPECT_RATIOS,
   generateId
 } from '@shared/types'
 import { sortImageModels, pickImageModel, imageModelShortLabel } from '@shared/imageModels'
@@ -481,6 +484,22 @@ export function GenerationWorkspace({
               Model: Kling v3.0 ({DEFAULT_VIDEO_MODEL})
             </p>
           )}
+
+          <div className="space-y-1">
+            <Label>Aspect ratio</Label>
+            <select
+              value={draft.aspectRatio ?? DEFAULT_ASPECT_RATIO}
+              onChange={(e) => patchDraft({ aspectRatio: e.target.value })}
+              className="w-full h-8 rounded-md border border-border bg-card px-2 text-xs"
+            >
+              {(mode === 'video' ? VIDEO_ASPECT_RATIOS : IMAGE_ASPECT_RATIOS).map((ratio) => (
+                <option key={ratio} value={ratio}>
+                  {ratio}
+                  {ratio === DEFAULT_ASPECT_RATIO ? ' (default)' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         <div className="p-4 space-y-4 flex-1">
