@@ -44,6 +44,17 @@ resources/models/silero_vad.onnx
 
 Download from [snakers4/silero-vad](https://github.com/snakers4/silero-vad). Without the model, AI modes fall back to energy-based VAD.
 
+## Higgsfield AI Integration
+
+Generate audio, images, and video via the [Higgsfield CLI](https://higgsfield.ai/cli) from the **Higgsfield** tab in the editor.
+
+```bash
+npm install -g @higgsfield/cli
+higgsfield auth login
+```
+
+In the editor: open the Higgsfield tab → **Connect** → pick model → enter prompt → **Generate**. Audio output is imported into the timeline automatically.
+
 ## Build
 
 ```bash

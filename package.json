@@ -3,16 +3,17 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Professional AI Silence Removal Audio Editor",
-  "main": "./out/main/index.js",
+  "main": "./out/main/index.cjs",
   "author": "",
   "license": "MIT",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node scripts/run-dev.mjs",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "postinstall": "node scripts/install-electron.js"
   },
   "dependencies": {
+    "@higgsfield/cli": "^1.1.5",
     "@radix-ui/react-dialog": "^1.1.6",
     "@radix-ui/react-label": "^2.1.2",
     "@radix-ui/react-select": "^2.1.6",
