@@ -97,12 +97,13 @@ export function detectTraditionalSilence(
     if (hysteresisFlags[i]) {
       if (regionStart === null) regionStart = startMs
     } else if (regionStart !== null) {
-      const duration = endMs - regionStart
+      const regionEndMs = startMs
+      const duration = regionEndMs - regionStart
       if (duration >= params.minSilenceDurationMs) {
         regions.push({
           id: generateId(),
           startMs: regionStart,
-          endMs,
+          endMs: regionEndMs,
           confidence: 0.8,
           source: 'traditional',
           removed: false
