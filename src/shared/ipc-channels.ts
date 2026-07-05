@@ -2,6 +2,7 @@ export const IPC = {
   OPEN_FILE: 'dialog:open-file',
   SAVE_FILE: 'dialog:save-file',
   LOAD_AUDIO: 'audio:load',
+  AUDIO_PEAKS: 'audio:peaks',
   DETECT_SILENCE: 'detection:run',
   EXPORT_AUDIO: 'audio:export',
   EXPORT_AUDIO_TEMP: 'audio:export-temp',
