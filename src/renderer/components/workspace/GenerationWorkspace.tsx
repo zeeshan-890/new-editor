@@ -9,7 +9,8 @@ import {
   RefreshCw,
   Sparkles,
   Video,
-  X
+  X,
+  Scissors
 } from 'lucide-react'
 import { cn } from '@renderer/lib/utils'
 import {
@@ -47,6 +48,11 @@ import {
   validateImageGenerationInput
 } from '@shared/imageGeneration'
 
+import {
+  importGenerationIntoEditor,
+  canPreviewVideoInBrowser,
+  generationVideoSrc
+} from '@renderer/lib/projectEditorMedia'
 import { localMediaPathUrl } from '@renderer/lib/localFileProtocol'
 
 function isVideoUrl(url: string): boolean {
@@ -91,6 +97,7 @@ export function GenerationWorkspace({
   const trackJob = useProjectTabStore((s) => s.trackJob)
   const handleJobUpdate = useProjectTabStore((s) => s.handleJobUpdate)
   const pendingJobProjects = useProjectTabStore((s) => s.pendingJobProjects)
+  const openProjectEditorTab = useProjectTabStore((s) => s.openProjectEditorTab)
 
   const jobs = useHiggsfieldStore((s) => s.jobs)
   const queueStats = useHiggsfieldStore((s) => s.queueStats)
@@ -158,6 +165,16 @@ export function GenerationWorkspace({
         Loading project…
       </div>
     )
+  }
+
+  const addGenerationToEditor = async (item: ProjectGeneration): Promise<void> => {
+    setError(null)
+    try {
+      await importGenerationIntoEditor(projectId, item)
+      await openProjectEditorTab(projectId)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   const activeWorkspaceId =
@@ -737,12 +754,17 @@ export function GenerationWorkspace({
       </aside>
 
       <main className="flex-1 flex flex-col min-w-0 min-h-0">
-        <div className="px-4 py-2 border-b border-border flex items-center justify-between shrink-0">
+        <div className="px-4 py-2 border-b border-border flex items-center justify-between shrink-0 gap-2">
           <span className="text-sm font-medium">
             Project gallery ({project.generations.length}
             {activeJobs.length > 0 ? ` · ${activeJobs.length} in progress` : ''})
           </span>
-          <span className="text-[10px] text-muted">Shared gallery · tab composer is isolated</span>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button size="sm" variant="outline" onClick={() => void openProjectEditorTab(projectId)}>
+              <Scissors size={14} className="mr-1" /> Video editor
+            </Button>
+            <span className="text-[10px] text-muted hidden sm:inline">Shared gallery · tab composer is isolated</span>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4">
@@ -765,6 +787,7 @@ export function GenerationWorkspace({
                   onPreview={() => setLightboxItem(item)}
                   onLoadSettings={() => void loadGenerationIntoTab(tabId, projectId, item)}
                   onDownload={() => void downloadGeneration(item)}
+                  onAddToEditor={() => void addGenerationToEditor(item)}
                 />
               ))}
             </div>
@@ -800,6 +823,17 @@ export function GenerationWorkspace({
                 <button
                   type="button"
                   className="rounded-md p-1.5 text-white/85 hover:bg-white/10 hover:text-white"
+                  title="Add to video editor"
+                  onClick={() => {
+                    void addGenerationToEditor(lightboxItem)
+                    setLightboxItem(null)
+                  }}
+                >
+                  <Scissors size={18} />
+                </button>
+                <button
+                  type="button"
+                  className="rounded-md p-1.5 text-white/85 hover:bg-white/10 hover:text-white"
                   title="Download"
                   onClick={() => void downloadGeneration(lightboxItem)}
                 >
@@ -816,9 +850,11 @@ export function GenerationWorkspace({
               </div>
               {lightboxItem.type === 'video' || isVideoUrl(lightboxItem.url) ? (
                 <video
-                  src={lightboxItem.url}
+                  src={generationVideoSrc(lightboxItem)}
                   controls
                   autoPlay
+                  playsInline
+                  preload="metadata"
                   className="max-h-[78vh] max-w-[96vw] rounded-lg shadow-2xl"
                 />
               ) : (
@@ -846,7 +882,8 @@ function GalleryTile({
   selected,
   onPreview,
   onLoadSettings,
-  onDownload
+  onDownload,
+  onAddToEditor
 }: {
   item: ProjectGeneration
   index: number
@@ -854,9 +891,9 @@ function GalleryTile({
   onPreview: () => void
   onLoadSettings: () => void
   onDownload: () => void
+  onAddToEditor: () => void
 }): React.JSX.Element {
   const isVideo = item.type === 'video' || isVideoUrl(item.url)
-  const canDrag = !isVideo
   const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handleClick = (): void => {
@@ -877,18 +914,13 @@ function GalleryTile({
 
   return (
     <div
-      draggable={canDrag}
+      draggable
       onDragStart={(e) => {
-        if (!canDrag) {
-          e.preventDefault()
-          return
-        }
         e.stopPropagation()
         setGalleryDragData(e.dataTransfer, item)
       }}
       className={cn(
-        'group relative aspect-square rounded-lg border overflow-hidden bg-card cursor-pointer transition-shadow',
-        canDrag && 'cursor-grab active:cursor-grabbing',
+        'group relative aspect-square rounded-lg border overflow-hidden bg-card cursor-grab active:cursor-grabbing transition-shadow',
         selected
           ? 'border-primary ring-2 ring-primary/60 shadow-lg shadow-primary/10'
           : 'border-border hover:border-primary/40'
@@ -897,12 +929,20 @@ function GalleryTile({
       onDoubleClick={handleDoubleClick}
     >
       {isVideo ? (
-        <video
-          src={item.url}
-          muted
-          playsInline
-          className="h-full w-full object-cover pointer-events-none select-none"
-        />
+        canPreviewVideoInBrowser(item) ? (
+          <video
+            src={generationVideoSrc(item)}
+            muted
+            playsInline
+            preload="metadata"
+            className="h-full w-full object-cover pointer-events-none select-none"
+          />
+        ) : (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-black/50 text-white/70">
+            <Video size={28} />
+            <span className="text-[9px] px-2 text-center">Preview after download</span>
+          </div>
+        )
       ) : (
         <img
           src={item.url}
@@ -944,6 +984,17 @@ function GalleryTile({
         <button
           type="button"
           className="rounded-full bg-black/50 p-1 hover:bg-black/70"
+          title="Add to video editor"
+          onClick={(e) => {
+            e.stopPropagation()
+            onAddToEditor()
+          }}
+        >
+          <Scissors size={12} className="text-white" />
+        </button>
+        <button
+          type="button"
+          className="rounded-full bg-black/50 p-1 hover:bg-black/70"
           title="Download"
           onClick={(e) => {
             e.stopPropagation()
@@ -960,15 +1011,15 @@ function GalleryTile({
         </span>
       )}
 
-      {canDrag && (
+      {!isVideo && (
         <span className="absolute bottom-10 right-2 rounded bg-black/60 px-1.5 py-0.5 text-[9px] text-white/80 opacity-0 group-hover:opacity-100">
           Drag to attach
         </span>
       )}
 
-      {!canDrag && (
+      {isVideo && (
         <span className="absolute bottom-10 right-2 rounded bg-black/60 px-1.5 py-0.5 text-[9px] text-white/80 opacity-0 group-hover:opacity-100">
-          Double-click to edit
+          Drag to editor
         </span>
       )}
 

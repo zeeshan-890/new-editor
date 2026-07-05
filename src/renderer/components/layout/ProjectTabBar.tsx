@@ -19,6 +19,7 @@ export function ProjectTabBar(): React.JSX.Element {
   const openNewProjectTab = useProjectTabStore((s) => s.openNewProjectTab)
   const openExistingProjectTab = useProjectTabStore((s) => s.openExistingProjectTab)
   const openEditorTab = useProjectTabStore((s) => s.openEditorTab)
+  const openProjectEditorTab = useProjectTabStore((s) => s.openProjectEditorTab)
 
   return (
     <div className="relative flex items-end gap-0.5 px-2 pt-2 pb-0 bg-card border-b border-border shrink-0 min-h-[40px]">
@@ -75,10 +76,10 @@ export function ProjectTabBar(): React.JSX.Element {
             <button
               type="button"
               className="w-full text-left rounded px-3 py-2 text-sm hover:bg-background flex items-center gap-2"
-              onClick={() => openEditorTab()}
+              onClick={() => void openEditorTab()}
             >
               <Scissors size={14} className="text-primary" />
-              Open Video Editor
+              Blank video editor
             </button>
             {projectList.length > 0 && (
               <>
@@ -87,17 +88,26 @@ export function ProjectTabBar(): React.JSX.Element {
                 </div>
                 <div className="max-h-48 overflow-y-auto space-y-0.5">
                   {projectList.map((project) => (
-                    <button
-                      key={project.id}
-                      type="button"
-                      className="w-full text-left rounded px-3 py-1.5 text-xs hover:bg-background"
-                      onClick={() => void openExistingProjectTab(project.id)}
-                    >
-                      <span className="font-medium">{project.name}</span>
-                      <span className="text-muted ml-1">
-                        · {project.generationCount} items · {project.mode}
-                      </span>
-                    </button>
+                    <div key={project.id} className="flex gap-0.5">
+                      <button
+                        type="button"
+                        className="flex-1 text-left rounded px-3 py-1.5 text-xs hover:bg-background"
+                        onClick={() => void openExistingProjectTab(project.id)}
+                      >
+                        <span className="font-medium">{project.name}</span>
+                        <span className="text-muted ml-1">
+                          · {project.generationCount} items · {project.mode}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        title="Open video editor for this project"
+                        className="shrink-0 rounded px-2 py-1.5 text-xs hover:bg-background text-primary"
+                        onClick={() => void openProjectEditorTab(project.id)}
+                      >
+                        <Scissors size={12} />
+                      </button>
+                    </div>
                   ))}
                 </div>
               </>

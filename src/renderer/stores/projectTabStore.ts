@@ -15,7 +15,9 @@ import {
   APP_SESSION_VERSION,
   DEFAULT_IMAGE_MODEL,
   generateId,
-  generationToModeDraft
+  generationToModeDraft,
+  normalizeGenerationProject,
+  normalizeTabComposerState
 } from '@shared/types'
 import { isLegacyDefaultImageModel, shouldUseDefaultImageModel } from '@shared/imageModels'
 
@@ -58,8 +60,8 @@ function draftsForTabs(
 ): Record<string, TabComposerState> {
   const next = { ...existing }
   for (const tab of tabs) {
-    if (tab.kind === 'generation' && !next[tab.id]) {
-      next[tab.id] = createEmptyTabComposerState()
+    if (tab.kind === 'generation') {
+      next[tab.id] = normalizeTabComposerState(next[tab.id])
     }
   }
   return next
@@ -83,7 +85,14 @@ export const useProjectTabStore = create<{
   closeTab: (tabId: string) => void
   openNewProjectTab: () => Promise<void>
   openExistingProjectTab: (projectId: string) => Promise<void>
-  openEditorTab: () => void
+  openEditorTab: (projectId?: string) => Promise<void>
+  openProjectEditorTab: (projectId: string) => Promise<void>
+  updateProjectGenerationLocalPath: (
+    projectId: string,
+    generationId: string,
+    localPath: string
+  ) => void
+  saveVideoEditorForProject: (projectId: string) => void
   refreshProjectList: () => Promise<void>
   updateProject: (projectId: string, patch: Partial<GenerationProject>) => void
   updateTabDraft: (tabId: string, patch: Partial<TabComposerState>) => void
@@ -130,9 +139,9 @@ export const useProjectTabStore = create<{
 
       const projects: Record<string, GenerationProject> = {}
       for (const tab of tabs) {
-        if (tab.kind === 'generation' && tab.projectId) {
-          const project = await window.electronAPI.loadProject(tab.projectId)
-          if (project) projects[tab.projectId] = project
+        if (tab.projectId) {
+          const loaded = await window.electronAPI.loadProject(tab.projectId)
+          if (loaded) projects[tab.projectId] = normalizeGenerationProject(loaded)
           else tabs = tabs.filter((t) => t.id !== tab.id)
         }
       }
@@ -241,7 +250,7 @@ export const useProjectTabStore = create<{
     if (!project) {
       const loaded = await window.electronAPI.loadProject(projectId)
       if (!loaded) return
-      project = loaded
+      project = normalizeGenerationProject(loaded)
     }
 
     const tab: AppTab = {
@@ -261,18 +270,67 @@ export const useProjectTabStore = create<{
     scheduleSessionSave(get, get().tabs, tab.id, tabDrafts)
   },
 
-  openEditorTab: () => {
+  openEditorTab: async (projectId) => {
+    let title = 'Video Editor'
+    let project: GenerationProject | undefined
+
+    if (projectId) {
+      project = get().projects[projectId]
+      if (!project && window.electronAPI) {
+        const loaded = await window.electronAPI.loadProject(projectId)
+        if (loaded) project = normalizeGenerationProject(loaded)
+      }
+      if (project) title = `${project.name} · Editor`
+    }
+
     const tab: AppTab = {
       id: generateId(),
       kind: 'editor',
-      title: 'Video Editor'
+      title,
+      projectId
     }
     set((state) => ({
       tabs: [...state.tabs, tab],
       activeTabId: tab.id,
-      newTabMenuOpen: false
+      newTabMenuOpen: false,
+      projects: project
+        ? { ...state.projects, [project.id]: normalizeGenerationProject(project) }
+        : state.projects
     }))
     scheduleSessionSave(get, get().tabs, tab.id, get().tabDrafts)
+  },
+
+  openProjectEditorTab: async (projectId) => {
+    const existing = get().tabs.find((t) => t.kind === 'editor' && t.projectId === projectId)
+    if (existing) {
+      set({ activeTabId: existing.id, newTabMenuOpen: false })
+      scheduleSessionSave(get, get().tabs, existing.id, get().tabDrafts)
+      return
+    }
+    await get().openEditorTab(projectId)
+  },
+
+  updateProjectGenerationLocalPath: (projectId, generationId, localPath) => {
+    set((state) => {
+      const current = state.projects[projectId]
+      if (!current) return state
+      const updated = {
+        ...current,
+        generations: current.generations.map((g) =>
+          g.id === generationId ? { ...g, localPath } : g
+        ),
+        updatedAt: Date.now()
+      }
+      scheduleProjectSave(projectId, get)
+      return { projects: { ...state.projects, [projectId]: updated } }
+    })
+  },
+
+  saveVideoEditorForProject: (projectId) => {
+    void import('@renderer/stores/videoEditorStore').then(({ useVideoEditorStore }) => {
+      const snapshot = useVideoEditorStore.getState().getProjectSnapshot()
+      get().updateProject(projectId, { videoEditor: snapshot })
+    })
   },
 
   refreshProjectList: async () => {
@@ -397,7 +455,7 @@ export const useProjectTabStore = create<{
     if (job.status === 'completed' && job.resultUrls[0]) {
       const type = job.category === 'video' ? 'video' : 'image'
       const config = get().pendingJobConfigs[job.id]
-      get().addProjectGeneration(projectId, {
+      const generation: ProjectGeneration = {
         id: job.id,
         type,
         prompt: config?.prompt ?? '',
@@ -412,7 +470,16 @@ export const useProjectTabStore = create<{
           : undefined,
         videoStartFrame: config?.videoStartFrame ? { ...config.videoStartFrame } : undefined,
         videoDuration: config?.videoDuration
-      })
+      }
+      get().addProjectGeneration(projectId, generation)
+      if (window.electronAPI?.ensureGenerationMedia) {
+        void window.electronAPI
+          .ensureGenerationMedia(projectId, generation)
+          .then(({ localPath }) => {
+            get().updateProjectGenerationLocalPath(projectId, generation.id, localPath)
+          })
+          .catch(() => {})
+      }
     }
 
     if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {

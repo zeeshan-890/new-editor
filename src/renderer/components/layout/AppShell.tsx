@@ -29,7 +29,7 @@ export function AppShell(): React.JSX.Element {
       <ProjectTabBar />
       <div className="flex-1 flex min-h-0">
         {activeTab?.kind === 'editor' ? (
-          <VideoEditorShell embedded />
+          <VideoEditorShell embedded tabId={activeTab.id} projectId={activeTab.projectId} />
         ) : activeTab?.projectId ? (
           <GenerationWorkspace tabId={activeTab.id} projectId={activeTab.projectId} />
         ) : (

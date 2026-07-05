@@ -40,6 +40,7 @@ export const IPC = {
   PROJECT_IMPORT_MEDIA: 'project:import-media',
   PROJECT_IMPORT_MEDIA_BYTES: 'project:import-media-bytes',
   PROJECT_IMPORT_MEDIA_URL: 'project:import-media-url',
+  PROJECT_ENSURE_GENERATION_MEDIA: 'project:ensure-generation-media',
   PROJECT_HYDRATE_DRAFT: 'project:hydrate-draft',
   SESSION_LOAD: 'session:load',
   SESSION_SAVE: 'session:save',
@@ -47,6 +48,7 @@ export const IPC = {
   VIDEO_PROBE: 'video:probe',
   VIDEO_FILMSTRIP: 'video:filmstrip',
   VIDEO_EXPORT: 'video:export',
+  VIDEO_EDITOR_PROJECT_SAVE: 'video-editor:project-save',
   MEDIA_SAVE_AS: 'media:save-as'
 } as const
 

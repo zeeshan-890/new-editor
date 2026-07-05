@@ -1,6 +1,6 @@
 {
   "name": "silence-editor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "Professional AI Silence Removal Audio Editor",
   "main": "./out/main/index.cjs",
@@ -10,6 +10,10 @@
     "dev": "node scripts/run-dev.mjs",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
+    "dist": "node scripts/clean-release.mjs && npm run build && electron-builder --win nsis",
+    "dist:alt": "node scripts/clean-release.mjs release-build && npm run build && electron-builder --win nsis --config.directories.output=release-build",
+    "dist:portable": "npm run build && electron-builder --win portable",
+    "dist:dir": "npm run build && electron-builder --win dir",
     "postinstall": "node scripts/install-electron.js"
   },
   "dependencies": {
@@ -47,5 +51,50 @@
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.3",
     "vite": "^6.1.0"
+  },
+  "build": {
+    "appId": "com.silence-editor.app",
+    "productName": "Silence Editor",
+    "copyright": "Copyright © 2026",
+    "directories": {
+      "output": "release",
+      "buildResources": "resources"
+    },
+    "compression": "maximum",
+    "electronLanguages": ["en-US"],
+    "files": [
+      "out/**/*",
+      "resources/**/*",
+      "package.json",
+      "!node_modules/onnxruntime-node/bin/**/darwin/**",
+      "!node_modules/onnxruntime-node/bin/**/linux/**",
+      "!node_modules/onnxruntime-node/bin/**/win32/arm64/**"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/models/",
+        "to": "models",
+        "filter": ["**/*"]
+      }
+    ],
+    "asarUnpack": [
+      "**/node_modules/ffmpeg-static/**",
+      "**/node_modules/onnxruntime-node/**",
+      "**/node_modules/@higgsfield/cli/vendor/**"
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "differentialPackage": false,
+      "installerLanguages": ["en_US"]
+    }
   }
 }

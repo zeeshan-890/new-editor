@@ -16,6 +16,7 @@ import type {
   GenerationProject,
   MediaAsset,
   TimelineLayer,
+  VideoEditorProject,
   VideoFilmstrip,
   WaveformPeaks
 } from '../../shared/types'
@@ -65,7 +66,7 @@ import {
   saveProject,
   saveSession
 } from '../projects/store'
-import { hydrateGenerationDraft } from '../projects/media'
+import { hydrateGenerationDraft, ensureGenerationMediaInProject } from '../projects/media'
 
 let currentPcmPath: string | null = null
 let currentMetadata: LoadedAudioProject['metadata'] | null = null
@@ -118,6 +119,17 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     return result.canceled ? null : result.filePath
   })
 
+  ipcMain.handle(IPC.VIDEO_EDITOR_PROJECT_SAVE, async (_e, project: VideoEditorProject) => {
+    const win = getWindow()
+    const result = await dialog.showSaveDialog(win ?? undefined, {
+      defaultPath: `${project.name || 'sequence'}.json`,
+      filters: [{ name: 'Video Editor Project', extensions: ['json'] }]
+    })
+    if (result.canceled || !result.filePath) return null
+    await fs.writeFile(result.filePath, JSON.stringify(project, null, 2), 'utf-8')
+    return result.filePath
+  })
+
   ipcMain.handle(IPC.OPEN_IMAGE_FILE, async () => {
     const win = getWindow()
     const result = await dialog.showOpenDialog(win ?? undefined, {
@@ -156,6 +168,12 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     IPC.PROJECT_HYDRATE_DRAFT,
     async (_e, projectId: string, generation: import('../../shared/types').ProjectGeneration) =>
       hydrateGenerationDraft(projectId, generation)
+  )
+
+  ipcMain.handle(
+    IPC.PROJECT_ENSURE_GENERATION_MEDIA,
+    async (_e, projectId: string, generation: import('../../shared/types').ProjectGeneration) =>
+      ensureGenerationMediaInProject(projectId, generation)
   )
 
   ipcMain.handle(IPC.SESSION_LOAD, async () => loadSession())

@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Lock, LockOpen, Volume2, VolumeX } from 'lucide-react'
-import { useVideoEditorStore } from '@renderer/stores/videoEditorStore'
+import { useVideoEditorStore, EMPTY_SILENCE_REGIONS, EMPTY_TIMELINE_MARKERS } from '@renderer/stores/videoEditorStore'
 import { usePlaybackStore } from '@renderer/stores/playbackStore'
 import { clipDurationMs } from '@shared/types'
 import { localMediaPathUrl } from '@renderer/lib/localFileProtocol'
 import { clamp, cn } from '@renderer/lib/utils'
+import {
+  clampTimelineScrollMs,
+  timelineMaxScrollMs,
+  timelineVisibleDurationMs,
+  zoomTimelineAt
+} from '@renderer/lib/timelineView'
 import { TimelineClipBlock } from './TimelineClipBlock'
 import { VideoTimeRuler } from './VideoTimeRuler'
 
@@ -32,6 +38,7 @@ const LAYER_STYLE: Record<string, { bar: string; clip: string; label: string }> 
 
 export function VideoTimeline(): React.JSX.Element {
   const layers = useVideoEditorStore((s) => s.project.layers)
+  const markers = useVideoEditorStore((s) => s.project.markers ?? EMPTY_TIMELINE_MARKERS)
   const selectedLayerId = useVideoEditorStore((s) => s.project.selectedLayerId)
   const assets = useVideoEditorStore((s) => s.project.assets)
   const selectedClipId = useVideoEditorStore((s) => s.project.selectedClipId)
@@ -52,6 +59,7 @@ export function VideoTimeline(): React.JSX.Element {
   const setPlayheadMs = usePlaybackStore((s) => s.setPlayheadMs)
   const setScrollMs = usePlaybackStore((s) => s.setScrollMs)
   const setZoom = usePlaybackStore((s) => s.setZoom)
+  const clampScrollToDuration = usePlaybackStore((s) => s.clampScrollToDuration)
 
   const containerRef = useRef<HTMLDivElement>(null)
   const tracksScrollRef = useRef<HTMLDivElement>(null)
@@ -85,8 +93,12 @@ export function VideoTimeline(): React.JSX.Element {
     return () => ro.disconnect()
   }, [])
 
-  const visibleDurationMs = durationMs / zoom
-  const maxScrollMs = Math.max(0, durationMs - visibleDurationMs)
+  useEffect(() => {
+    clampScrollToDuration(durationMs)
+  }, [durationMs, zoom, clampScrollToDuration])
+
+  const visibleDurationMs = timelineVisibleDurationMs(durationMs, zoom)
+  const maxScrollMs = timelineMaxScrollMs(durationMs, zoom)
   const msToX = useCallback(
     (ms: number) => ((ms - scrollMs) / visibleDurationMs) * width,
     [scrollMs, visibleDurationMs, width]
@@ -98,21 +110,20 @@ export function VideoTimeline(): React.JSX.Element {
 
   const onWheel = (e: React.WheelEvent): void => {
     e.preventDefault()
-    if (e.ctrlKey) {
+    if (e.ctrlKey || e.metaKey) {
       const rect = timelineContentRef.current?.getBoundingClientRect()
       const cursorX = rect && width > 0 ? clamp(e.clientX - rect.left, 0, width) : width / 2
       const cursorMs = scrollMs + (cursorX / width) * visibleDurationMs
-      const nextZoom = clamp(zoom * (e.deltaY > 0 ? 0.9 : 1.1), 0.05, 50)
-      const nextVisible = durationMs / nextZoom
-      const nextMaxScroll = Math.max(0, durationMs - nextVisible)
-      const nextScroll = clamp(cursorMs - (cursorX / width) * nextVisible, 0, nextMaxScroll)
-      setZoom(nextZoom)
-      setScrollMs(nextScroll)
+      const factor = e.deltaY > 0 ? 0.9 : 1.1
+      const ratio = width > 0 ? cursorX / width : 0.5
+      const next = zoomTimelineAt(durationMs, zoom, scrollMs, factor, cursorMs, ratio)
+      setZoom(next.zoom, durationMs)
+      setScrollMs(next.scrollMs, durationMs)
       return
     }
     const deltaPx = e.deltaX !== 0 ? e.deltaX : e.deltaY
     const deltaMs = width > 0 ? (deltaPx / width) * visibleDurationMs : 0
-    setScrollMs(clamp(scrollMs + deltaMs, 0, maxScrollMs))
+    setScrollMs(clampTimelineScrollMs(durationMs, zoom, scrollMs + deltaMs), durationMs)
   }
 
   const onScrollBar = (e: React.ChangeEvent<HTMLInputElement>): void => {
@@ -160,20 +171,21 @@ export function VideoTimeline(): React.JSX.Element {
     : null
 
   return (
-    <div ref={containerRef} className="relative flex flex-col min-h-0 border-t border-border bg-card/30">
+    <div ref={containerRef} className="relative flex flex-col min-h-0 min-w-0 overflow-hidden border-t border-border bg-card/30">
       <div
         ref={tracksScrollRef}
-        className="relative flex-1 overflow-y-auto min-h-0 [scrollbar-gutter:stable]"
+        className="relative flex-1 min-w-0 overflow-x-hidden overflow-y-auto min-h-0 [scrollbar-gutter:stable]"
         onWheel={onWheel}
       >
         <div className="sticky top-0 z-10 flex shrink-0 border-b border-border bg-card/30">
           <div style={{ width: TRACK_HEADER_W }} className="shrink-0" />
-          <div ref={timelineContentRef} className="flex-1 min-w-0">
+          <div ref={timelineContentRef} className="flex-1 min-w-0 overflow-hidden">
             <VideoTimeRuler
               width={width}
               scrollMs={scrollMs}
               visibleDurationMs={visibleDurationMs}
               msToX={msToX}
+              markers={markers}
             />
           </div>
         </div>
@@ -231,7 +243,7 @@ export function VideoTimeline(): React.JSX.Element {
               </div>
             </div>
             <div
-              className={cn('relative flex-1 min-w-0', style.bar)}
+              className={cn('relative flex-1 min-w-0 overflow-hidden', style.bar)}
               onMouseDown={(e) => {
                 if (e.target !== e.currentTarget) return
                 selectLayer(layer.id)
@@ -329,7 +341,7 @@ export function VideoTimeline(): React.JSX.Element {
             >
               New {dropTarget.layerType} layer
             </div>
-            <div className={cn('relative flex-1 min-w-0', ghostStyle.bar)}>
+            <div className={cn('relative flex-1 min-w-0 overflow-hidden', ghostStyle.bar)}>
               <div
                 className={cn(
                   'absolute top-1 bottom-1 rounded border-2 border-dashed pointer-events-none opacity-70',
@@ -369,7 +381,7 @@ export function VideoTimeline(): React.JSX.Element {
       <div
         className="pointer-events-none absolute z-20 w-0.5 bg-white shadow-[0_0_6px_rgba(255,255,255,0.8)]"
         style={{
-          left: TRACK_HEADER_W + msToX(playheadMs),
+          left: TRACK_HEADER_W + clamp(msToX(playheadMs), 0, width),
           top: 24,
           bottom: 0
         }}

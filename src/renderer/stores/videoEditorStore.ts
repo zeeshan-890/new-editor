@@ -5,6 +5,7 @@ import type {
   SilenceRegion,
   TimelineClip,
   TimelineLayer,
+  TimelineMarker,
   VideoEditorProject,
   VideoFilmstrip,
   WaveformPeaks
@@ -13,6 +14,7 @@ import {
   clipDurationMs,
   createEmptyVideoEditorProject,
   generateId,
+  normalizeVideoEditorProject,
   sequenceDurationMs
 } from '@shared/types'
 import { normalizePeaks } from '@renderer/lib/audio/normalizePeaks'
@@ -25,10 +27,18 @@ export interface AssetWaveform {
 }
 
 export const EMPTY_SILENCE_REGIONS: SilenceRegion[] = []
+export const EMPTY_TIMELINE_MARKERS: TimelineMarker[] = []
 
 interface HistorySnapshot {
   layers: TimelineLayer[]
   assets: MediaAsset[]
+  markers: TimelineMarker[]
+}
+
+interface ClipClipboard {
+  assetId: string
+  sourceInMs: number
+  sourceOutMs: number
 }
 
 function cloneLayers(layers: TimelineLayer[]): TimelineLayer[] {
@@ -146,6 +156,8 @@ export const useVideoEditorStore = create<{
   filmstripCache: Record<string, VideoFilmstrip>
   filmstripLoading: Record<string, boolean>
   silenceRegionsByClipId: Record<string, SilenceRegion[]>
+  clipClipboard: ClipClipboard | null
+  boundProjectId: string | null
 
   resetProject: () => void
   pushHistory: () => void
@@ -169,6 +181,18 @@ export const useVideoEditorStore = create<{
   splitClipAtPlayhead: () => void
   trimSelectedClip: (edge: 'in' | 'out', deltaMs: number) => void
   deleteSelectedClip: () => void
+  copySelectedClip: () => void
+  pasteClipAtPlayhead: () => void
+  duplicateSelectedClip: () => void
+  selectAdjacentLayer: (delta: number) => void
+  addMarkerAtPlayhead: () => void
+  saveProjectToFile: () => Promise<string | null>
+  loadFromGenerationProject: (
+    projectId: string,
+    projectName: string,
+    saved?: VideoEditorProject
+  ) => void
+  getProjectSnapshot: () => VideoEditorProject
   moveSelectedClip: (timelineStartMs: number) => void
   moveSelectedClipToPosition: (timelineStartMs: number, visualLayerIndex: number) => void
   peekSelectedClipDropTarget: (visualLayerIndex: number) => ClipDropTarget | null
@@ -188,10 +212,13 @@ export const useVideoEditorStore = create<{
   filmstripCache: {},
   filmstripLoading: {},
   silenceRegionsByClipId: {},
+  clipClipboard: null,
+  boundProjectId: null,
 
   resetProject: () =>
     set({
       project: createEmptyVideoEditorProject(),
+      boundProjectId: null,
       undoStack: [],
       redoStack: [],
       durationMs: 1000,
@@ -199,7 +226,8 @@ export const useVideoEditorStore = create<{
       waveformLoading: {},
       filmstripCache: {},
       filmstripLoading: {},
-      silenceRegionsByClipId: {}
+      silenceRegionsByClipId: {},
+      clipClipboard: null
     }),
 
   pushHistory: () => {
@@ -207,7 +235,11 @@ export const useVideoEditorStore = create<{
     set({
       undoStack: [
         ...undoStack.slice(-40),
-        { layers: cloneLayers(project.layers), assets: [...project.assets] }
+        {
+          layers: cloneLayers(project.layers),
+          assets: [...project.assets],
+          markers: [...(project.markers ?? EMPTY_TIMELINE_MARKERS)]
+        }
       ],
       redoStack: []
     })
@@ -221,9 +253,18 @@ export const useVideoEditorStore = create<{
       undoStack: undoStack.slice(0, -1),
       redoStack: [
         ...redoStack,
-        { layers: cloneLayers(project.layers), assets: [...project.assets] }
+        {
+          layers: cloneLayers(project.layers),
+          assets: [...project.assets],
+          markers: [...(project.markers ?? EMPTY_TIMELINE_MARKERS)]
+        }
       ],
-      project: { ...project, layers: cloneLayers(prev.layers), assets: [...prev.assets] },
+      project: {
+        ...project,
+        layers: cloneLayers(prev.layers),
+        assets: [...prev.assets],
+        markers: [...(prev.markers ?? EMPTY_TIMELINE_MARKERS)]
+      },
       durationMs: sequenceDurationMs(prev.layers)
     })
   },
@@ -236,9 +277,18 @@ export const useVideoEditorStore = create<{
       redoStack: redoStack.slice(0, -1),
       undoStack: [
         ...undoStack,
-        { layers: cloneLayers(project.layers), assets: [...project.assets] }
+        {
+          layers: cloneLayers(project.layers),
+          assets: [...project.assets],
+          markers: [...(project.markers ?? EMPTY_TIMELINE_MARKERS)]
+        }
       ],
-      project: { ...project, layers: cloneLayers(next.layers), assets: [...next.assets] },
+      project: {
+        ...project,
+        layers: cloneLayers(next.layers),
+        assets: [...next.assets],
+        markers: [...(next.markers ?? EMPTY_TIMELINE_MARKERS)]
+      },
       durationMs: sequenceDurationMs(next.layers)
     })
   },
@@ -533,7 +583,13 @@ export const useVideoEditorStore = create<{
   },
 
   splitClipAtPlayhead: () => {
-    get().splitAllAtPlayhead()
+    const selected = get().getSelectedClip()
+    const playhead = usePlaybackStore.getState().playheadMs
+    if (selected) {
+      get().splitSelectedClipAt(playhead)
+    } else {
+      get().splitAllAtPlayhead()
+    }
   },
 
   trimSelectedClip: (edge, deltaMs) => {
@@ -607,6 +663,166 @@ export const useVideoEditorStore = create<{
         silenceRegionsByClipId
       }
     })
+  },
+
+  copySelectedClip: () => {
+    const selected = get().getSelectedClip()
+    if (!selected) return
+    const { clip } = selected
+    set({
+      clipClipboard: {
+        assetId: clip.assetId,
+        sourceInMs: clip.sourceInMs,
+        sourceOutMs: clip.sourceOutMs
+      }
+    })
+  },
+
+  pasteClipAtPlayhead: () => {
+    const { clipClipboard, project } = get()
+    if (!clipClipboard) return
+
+    const asset = project.assets.find((a) => a.id === clipClipboard.assetId)
+    if (!asset) return
+
+    let layer = project.selectedLayerId
+      ? project.layers.find((l) => l.id === project.selectedLayerId)
+      : undefined
+    if (!layer || !isLayerCompatible(layer, asset.type)) {
+      layer = defaultLayerForAsset(project.layers, asset.type)
+    }
+    if (!layer || layer.locked) return
+
+    get().pushHistory()
+    const playhead = usePlaybackStore.getState().playheadMs
+    const clip: TimelineClip = {
+      id: generateId(),
+      assetId: clipClipboard.assetId,
+      layerId: layer.id,
+      timelineStartMs: Math.max(0, playhead),
+      sourceInMs: clipClipboard.sourceInMs,
+      sourceOutMs: clipClipboard.sourceOutMs
+    }
+
+    set((state) => {
+      const layers = state.project.layers.map((l) =>
+        l.id === layer!.id ? { ...l, clips: [...l.clips, clip] } : l
+      )
+      return {
+        project: {
+          ...state.project,
+          layers,
+          selectedClipId: clip.id,
+          selectedLayerId: layer!.id
+        },
+        durationMs: sequenceDurationMs(layers)
+      }
+    })
+  },
+
+  duplicateSelectedClip: () => {
+    const selected = get().getSelectedClip()
+    if (!selected || selected.layer.locked) return
+
+    const { clip, layer } = selected
+    get().pushHistory()
+    const duplicate: TimelineClip = {
+      id: generateId(),
+      assetId: clip.assetId,
+      layerId: layer.id,
+      timelineStartMs: clip.timelineStartMs + clipDurationMs(clip),
+      sourceInMs: clip.sourceInMs,
+      sourceOutMs: clip.sourceOutMs
+    }
+
+    set((state) => {
+      const layers = state.project.layers.map((l) =>
+        l.id === layer.id ? { ...l, clips: [...l.clips, duplicate] } : l
+      )
+      return {
+        project: {
+          ...state.project,
+          layers,
+          selectedClipId: duplicate.id,
+          selectedLayerId: layer.id
+        },
+        durationMs: sequenceDurationMs(layers)
+      }
+    })
+  },
+
+  selectAdjacentLayer: (delta) => {
+    const { project } = get()
+    const { layers } = project
+    if (layers.length === 0) return
+
+    const currentIndex = project.selectedLayerId
+      ? Math.max(0, layers.findIndex((l) => l.id === project.selectedLayerId))
+      : 0
+    const nextIndex = clamp(currentIndex + delta, 0, layers.length - 1)
+    const nextLayer = layers[nextIndex]
+    if (!nextLayer) return
+
+    const playhead = usePlaybackStore.getState().playheadMs
+    const clipOnLayer = nextLayer.clips.find(
+      (c) =>
+        playhead >= c.timelineStartMs &&
+        playhead < c.timelineStartMs + clipDurationMs(c)
+    )
+
+    set({
+      project: {
+        ...project,
+        selectedLayerId: nextLayer.id,
+        selectedClipId: clipOnLayer?.id ?? null
+      }
+    })
+  },
+
+  addMarkerAtPlayhead: () => {
+    const timeMs = usePlaybackStore.getState().playheadMs
+    const { project } = get()
+    if ((project.markers ?? EMPTY_TIMELINE_MARKERS).some((m) => Math.abs(m.timeMs - timeMs) < 50)) return
+
+    get().pushHistory()
+    const marker: TimelineMarker = { id: generateId(), timeMs }
+    set((state) => ({
+      project: {
+        ...state.project,
+        markers: [...(state.project.markers ?? EMPTY_TIMELINE_MARKERS), marker].sort((a, b) => a.timeMs - b.timeMs)
+      }
+    }))
+  },
+
+  saveProjectToFile: async () => {
+    if (!window.electronAPI?.saveVideoEditorProject) return null
+    const { project } = get()
+    return window.electronAPI.saveVideoEditorProject(get().getProjectSnapshot())
+  },
+
+  loadFromGenerationProject: (projectId, projectName, saved) => {
+    const project = normalizeVideoEditorProject(saved, projectName)
+    set({
+      boundProjectId: projectId,
+      project: { ...project, id: project.id || projectId, name: projectName },
+      durationMs: sequenceDurationMs(project.layers),
+      undoStack: [],
+      redoStack: [],
+      silenceRegionsByClipId: {},
+      clipClipboard: null
+    })
+  },
+
+  getProjectSnapshot: () => {
+    const { project } = get()
+    return {
+      ...project,
+      layers: cloneLayers(project.layers),
+      assets: [...project.assets],
+      markers: [...(project.markers ?? EMPTY_TIMELINE_MARKERS)],
+      selectedClipId: null,
+      selectedLayerId: project.selectedLayerId
+    }
   },
 
   moveSelectedClip: (timelineStartMs) => {

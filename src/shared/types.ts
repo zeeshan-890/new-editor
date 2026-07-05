@@ -322,6 +322,8 @@ export interface GenerationProject {
   videoStartFrame: ProjectMedia | null
   videoDuration: number
   generations: ProjectGeneration[]
+  /** Timeline state for this project's video editor tab. */
+  videoEditor?: VideoEditorProject
   workspaceId?: string
 }
 
@@ -376,6 +378,12 @@ export interface VideoFilmstrip {
   frames: string[]
 }
 
+export interface TimelineMarker {
+  id: string
+  timeMs: number
+  label?: string
+}
+
 export interface TimelineClip {
   id: string
   assetId: string
@@ -399,9 +407,14 @@ export interface VideoEditorProject {
   name: string
   assets: MediaAsset[]
   layers: TimelineLayer[]
+  markers: TimelineMarker[]
   selectedClipId: string | null
   selectedLayerId: string | null
 }
+
+export const VIDEO_EDITOR_FPS = 30
+export const VIDEO_EDITOR_FRAME_MS = 1000 / VIDEO_EDITOR_FPS
+export const VIDEO_EDITOR_MULTI_FRAME_STEP = 10
 
 export function createEmptyVideoEditorProject(name = 'Untitled sequence'): VideoEditorProject {
   const videoLayerId = generateId()
@@ -414,6 +427,7 @@ export function createEmptyVideoEditorProject(name = 'Untitled sequence'): Video
       { id: videoLayerId, name: 'Video 1', type: 'video', clips: [] },
       { id: audioLayerId, name: 'Audio 1', type: 'audio', clips: [] }
     ],
+    markers: [],
     selectedClipId: null,
     selectedLayerId: videoLayerId
   }
@@ -455,7 +469,71 @@ export function createEmptyTabComposerState(): TabComposerState {
 }
 
 export function activeModeDraft(state: TabComposerState): GenerationModeDraft {
-  return state.activeMode === 'image' ? state.image : state.video
+  const empty = createEmptyTabComposerState()
+  if (state.activeMode === 'video') {
+    return state.video ?? empty.video
+  }
+  return state.image ?? empty.image
+}
+
+export function normalizeTabComposerState(state: TabComposerState | undefined): TabComposerState {
+  const empty = createEmptyTabComposerState()
+  if (!state) return empty
+  return {
+    activeMode: state.activeMode === 'video' ? 'video' : 'image',
+    selectedGenerationId: state.selectedGenerationId ?? null,
+    image: {
+      ...empty.image,
+      ...state.image,
+      imageAttachments: state.image?.imageAttachments ?? []
+    },
+    video: {
+      ...empty.video,
+      ...state.video,
+      videoStartFrame: state.video?.videoStartFrame ?? null
+    }
+  }
+}
+
+export function normalizeVideoEditorProject(
+  saved: Partial<VideoEditorProject> | undefined,
+  name = 'Untitled sequence'
+): VideoEditorProject {
+  const empty = createEmptyVideoEditorProject(name)
+  if (!saved) return empty
+  const layers =
+    Array.isArray(saved.layers) && saved.layers.length > 0
+      ? saved.layers.map((layer) => ({
+          ...layer,
+          clips: Array.isArray(layer.clips) ? layer.clips : []
+        }))
+      : empty.layers
+  return {
+    ...empty,
+    ...saved,
+    id: saved.id || empty.id,
+    name: saved.name || name,
+    assets: Array.isArray(saved.assets) ? saved.assets : [],
+    markers: Array.isArray(saved.markers) ? saved.markers : [],
+    layers,
+    selectedClipId: saved.selectedClipId ?? null,
+    selectedLayerId: saved.selectedLayerId ?? layers[0]?.id ?? null
+  }
+}
+
+export function normalizeGenerationProject(project: GenerationProject): GenerationProject {
+  const empty = createEmptyGenerationProject(project.name)
+  return {
+    ...empty,
+    ...project,
+    generations: Array.isArray(project.generations) ? project.generations : [],
+    imageAttachments: Array.isArray(project.imageAttachments) ? project.imageAttachments : [],
+    videoStartFrame: project.videoStartFrame ?? null,
+    videoDuration: project.videoDuration ?? empty.videoDuration,
+    videoEditor: project.videoEditor
+      ? normalizeVideoEditorProject(project.videoEditor, project.name)
+      : undefined
+  }
 }
 
 export { generationToModeDraft, buildEffectivePrompt } from './imageGeneration'

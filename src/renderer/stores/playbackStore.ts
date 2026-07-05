@@ -1,4 +1,8 @@
 import { create } from 'zustand'
+import {
+  clampTimelineScrollMs,
+  zoomTimelineAt
+} from '@renderer/lib/timelineView'
 
 interface PlaybackState {
   playheadMs: number
@@ -10,11 +14,12 @@ interface PlaybackState {
   setPlayheadMs: (ms: number) => void
   setIsPlaying: (playing: boolean) => void
   setLoopSelection: (loop: boolean) => void
-  setZoom: (zoom: number) => void
-  setScrollMs: (ms: number) => void
-  zoomIn: () => void
-  zoomOut: () => void
+  setZoom: (zoom: number, durationMs?: number) => void
+  setScrollMs: (ms: number, durationMs?: number) => void
+  zoomIn: (durationMs?: number, anchorMs?: number, anchorViewportRatio?: number) => void
+  zoomOut: (durationMs?: number, anchorMs?: number, anchorViewportRatio?: number) => void
   fitTimelineView: () => void
+  clampScrollToDuration: (durationMs: number) => void
 }
 
 export const usePlaybackStore = create<PlaybackState>((set) => ({
@@ -27,9 +32,47 @@ export const usePlaybackStore = create<PlaybackState>((set) => ({
   setPlayheadMs: (playheadMs) => set({ playheadMs }),
   setIsPlaying: (isPlaying) => set({ isPlaying }),
   setLoopSelection: (loopSelection) => set({ loopSelection }),
-  setZoom: (zoom) => set({ zoom: Math.max(0.1, Math.min(100, zoom)) }),
-  setScrollMs: (scrollMs) => set({ scrollMs: Math.max(0, scrollMs) }),
-  zoomIn: () => set((s) => ({ zoom: Math.min(100, s.zoom * 1.25) })),
-  zoomOut: () => set((s) => ({ zoom: Math.max(0.1, s.zoom / 1.25) })),
-  fitTimelineView: () => set({ scrollMs: 0, playheadMs: 0, zoom: 1 })
+  setZoom: (zoom, durationMs) =>
+    set((s) => {
+      const nextZoom = Math.max(0.1, Math.min(100, zoom))
+      if (durationMs == null) return { zoom: nextZoom }
+      return {
+        zoom: nextZoom,
+        scrollMs: clampTimelineScrollMs(durationMs, nextZoom, s.scrollMs)
+      }
+    }),
+  setScrollMs: (scrollMs, durationMs) =>
+    set((s) => ({
+      scrollMs:
+        durationMs == null
+          ? Math.max(0, scrollMs)
+          : clampTimelineScrollMs(durationMs, s.zoom, scrollMs)
+    })),
+  zoomIn: (durationMs, anchorMs, anchorViewportRatio) =>
+    set((s) => {
+      if (durationMs == null) {
+        return { zoom: Math.min(100, s.zoom * 1.25) }
+      }
+      const anchor = anchorMs ?? s.playheadMs
+      const visible = durationMs / s.zoom
+      const ratio =
+        anchorViewportRatio ?? (visible > 0 ? (anchor - s.scrollMs) / visible : 0.5)
+      return zoomTimelineAt(durationMs, s.zoom, s.scrollMs, 1.25, anchor, ratio)
+    }),
+  zoomOut: (durationMs, anchorMs, anchorViewportRatio) =>
+    set((s) => {
+      if (durationMs == null) {
+        return { zoom: Math.max(0.1, s.zoom / 1.25) }
+      }
+      const anchor = anchorMs ?? s.playheadMs
+      const visible = durationMs / s.zoom
+      const ratio =
+        anchorViewportRatio ?? (visible > 0 ? (anchor - s.scrollMs) / visible : 0.5)
+      return zoomTimelineAt(durationMs, s.zoom, s.scrollMs, 1 / 1.25, anchor, ratio)
+    }),
+  fitTimelineView: () => set({ scrollMs: 0, playheadMs: 0, zoom: 1 }),
+  clampScrollToDuration: (durationMs) =>
+    set((s) => ({
+      scrollMs: clampTimelineScrollMs(durationMs, s.zoom, s.scrollMs)
+    }))
 }))

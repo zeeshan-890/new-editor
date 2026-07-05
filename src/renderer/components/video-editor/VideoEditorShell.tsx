@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import { Button } from '../common/Button'
 import { Label } from '../common/Label'
+import { Dialog, DialogRow } from '../common/Dialog'
 import { VideoTimeline, localMediaUrl } from './VideoTimeline'
 import { VideoAudioSilencePanel } from './VideoAudioSilencePanel'
 import { useVideoEditorStore } from '@renderer/stores/videoEditorStore'
@@ -26,9 +27,31 @@ import {
   filePathFromDrop,
   mediaFilesFromDataTransfer
 } from '@renderer/lib/dropFiles'
+import { galleryDragPayloadFromDataTransfer } from '@renderer/lib/galleryDrag'
+import {
+  importGenerationIntoEditor,
+  isVideoGeneration,
+  canPreviewVideoInBrowser,
+  generationVideoSrc
+} from '@renderer/lib/projectEditorMedia'
+import { useProjectTabStore } from '@renderer/stores/projectTabStore'
 
-export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): React.JSX.Element {
+export function VideoEditorShell({
+  embedded = false,
+  tabId,
+  projectId
+}: {
+  embedded?: boolean
+  tabId?: string
+  projectId?: string
+}): React.JSX.Element {
   const project = useVideoEditorStore((s) => s.project)
+  const loadFromGenerationProject = useVideoEditorStore((s) => s.loadFromGenerationProject)
+  const resetProject = useVideoEditorStore((s) => s.resetProject)
+  const generationProject = useProjectTabStore((s) =>
+    projectId ? s.projects[projectId] : undefined
+  )
+  const saveVideoEditorForProject = useProjectTabStore((s) => s.saveVideoEditorForProject)
   const durationMs = useVideoEditorStore((s) => s.durationMs)
   const addAsset = useVideoEditorStore((s) => s.addAsset)
   const addLayer = useVideoEditorStore((s) => s.addLayer)
@@ -74,6 +97,31 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
   const [error, setError] = useState<string | null>(null)
   const [dragOverBin, setDragOverBin] = useState(false)
   const [importing, setImporting] = useState(false)
+  const [importingGenerationId, setImportingGenerationId] = useState<string | null>(null)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+
+  useEffect(() => {
+    return window.electronAPI?.onShowShortcuts(() => setShortcutsOpen(true))
+  }, [])
+
+  useEffect(() => {
+    if (!projectId) {
+      if (useVideoEditorStore.getState().boundProjectId) {
+        resetProject()
+      }
+      return
+    }
+    if (!generationProject) return
+    if (useVideoEditorStore.getState().boundProjectId === projectId) return
+    loadFromGenerationProject(projectId, generationProject.name, generationProject.videoEditor)
+  }, [projectId, tabId, generationProject, loadFromGenerationProject, resetProject])
+
+  useEffect(() => {
+    if (!projectId) return
+    return () => {
+      saveVideoEditorForProject(projectId)
+    }
+  }, [projectId, tabId, saveVideoEditorForProject])
 
   const importPaths = useCallback(
     async (paths: string[]): Promise<void> => {
@@ -157,16 +205,52 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
     async (e: React.DragEvent): Promise<void> => {
       allowFileDrop(e)
       setDragOverBin(false)
+
+      const galleryPayload = galleryDragPayloadFromDataTransfer(e.dataTransfer)
+      if (galleryPayload?.jobId && projectId && generationProject) {
+        const generation = generationProject.generations.find((g) => g.id === galleryPayload.jobId)
+        if (generation) {
+          setImportingGenerationId(generation.id)
+          setError(null)
+          try {
+            await importGenerationIntoEditor(projectId, generation)
+          } catch (err) {
+            setError(err instanceof Error ? err.message : String(err))
+          } finally {
+            setImportingGenerationId(null)
+          }
+          return
+        }
+      }
+
       const files = mediaFilesFromDataTransfer(e.dataTransfer)
       if (files.length === 0) {
-        setError('Drop a video, image, or audio file here.')
+        setError('Drop a video, image, audio file, or gallery item here.')
         return
       }
       for (const file of files) {
         await importDroppedFile(file)
       }
     },
-    [importDroppedFile]
+    [importDroppedFile, projectId, generationProject]
+  )
+
+  const addGenerationToTimeline = useCallback(
+    async (generationId: string): Promise<void> => {
+      if (!projectId || !generationProject) return
+      const generation = generationProject.generations.find((g) => g.id === generationId)
+      if (!generation) return
+      setImportingGenerationId(generationId)
+      setError(null)
+      try {
+        await importGenerationIntoEditor(projectId, generation)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setImportingGenerationId(null)
+      }
+    },
+    [projectId, generationProject]
   )
 
   const active = visualClipAtPlayhead(playheadMs)
@@ -226,7 +310,12 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
         <aside className="w-56 border-r border-border bg-card flex flex-col shrink-0">
           <div className="p-3 border-b border-border flex items-center gap-2">
             <Film size={16} className="text-primary" />
-            <span className="font-semibold text-sm">Media bin</span>
+            <div className="min-w-0">
+              <span className="font-semibold text-sm block">Media bin</span>
+              {generationProject && (
+                <span className="text-[10px] text-muted truncate block">{generationProject.name}</span>
+              )}
+            </div>
           </div>
           <div className="p-2 space-y-2">
             <Button
@@ -251,11 +340,65 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
             onDragLeave={() => setDragOverBin(false)}
             onDrop={(e) => void onDropMedia(e)}
           >
-            <p className="text-[10px] text-muted">Drop media files here</p>
+            <p className="text-[10px] text-muted">Drop media files or gallery items here</p>
           </div>
           {error && <p className="text-xs text-red-400 px-2">{error}</p>}
           <div className="flex-1 overflow-y-auto p-2 space-y-2">
-            {project.assets.length === 0 && (
+            {generationProject && generationProject.generations.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-[10px] font-medium text-muted px-1">
+                  Project gallery ({generationProject.generations.length})
+                </p>
+                {generationProject.generations.map((item) => {
+                  const isVideo = isVideoGeneration(item)
+                  const busy = importingGenerationId === item.id
+                  return (
+                    <div
+                      key={item.id}
+                      className="rounded border border-primary/30 bg-primary/5 p-2 space-y-2"
+                    >
+                      <div className="aspect-video rounded overflow-hidden bg-black/40 flex items-center justify-center">
+                        {isVideo ? (
+                          canPreviewVideoInBrowser(item) ? (
+                            <video
+                              src={generationVideoSrc(item)}
+                              muted
+                              playsInline
+                              preload="metadata"
+                              className="h-full w-full object-contain"
+                            />
+                          ) : (
+                            <div className="flex h-full w-full flex-col items-center justify-center gap-1 text-muted">
+                              <Film size={20} />
+                              <span className="text-[9px]">Not downloaded yet</span>
+                            </div>
+                          )
+                        ) : (
+                          <img
+                            src={item.url}
+                            alt={item.prompt}
+                            className="h-full w-full object-contain"
+                          />
+                        )}
+                      </div>
+                      <p className="text-[10px] font-medium truncate capitalize">
+                        {isVideo ? 'Video' : 'Image'} · {item.prompt || item.model}
+                      </p>
+                      <Button
+                        size="sm"
+                        className="w-full text-xs"
+                        disabled={busy || importing}
+                        onClick={() => void addGenerationToTimeline(item.id)}
+                      >
+                        {busy ? 'Adding…' : 'Add to timeline'}
+                      </Button>
+                    </div>
+                  )
+                })}
+                <div className="border-t border-border pt-2" />
+              </div>
+            )}
+            {project.assets.length === 0 && !generationProject?.generations.length && (
               <p className="text-[10px] text-muted px-1">
                 Import or drop clips — they are added to the timeline automatically.
               </p>
@@ -337,10 +480,10 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
             <Button size="sm" variant="outline" onClick={fitTimelineView} title="Fit timeline to content">
               Fit
             </Button>
-            <Button size="sm" variant="outline" onClick={zoomOut}>
+            <Button size="sm" variant="outline" onClick={() => zoomOut(durationMs)}>
               <ZoomOut size={14} />
             </Button>
-            <Button size="sm" variant="outline" onClick={zoomIn}>
+            <Button size="sm" variant="outline" onClick={() => zoomIn(durationMs)}>
               <ZoomIn size={14} />
             </Button>
             <Button size="sm" variant="outline" onClick={splitClipAtPlayhead}>
@@ -354,7 +497,7 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
             </Button>
           </div>
 
-          <div className="relative flex-1 min-h-[180px] max-h-[45%]">
+          <div className="relative flex-1 min-h-[180px] max-h-[45%] min-w-0 overflow-hidden">
             <VideoTimeline />
           </div>
         </main>
@@ -442,16 +585,45 @@ export function VideoEditorShell({ embedded = false }: { embedded?: boolean }): 
           )}
 
           <div className="text-[10px] text-muted space-y-1">
-            <p>S / B — split all layers at playhead</p>
-            <p>Del / Backspace — delete clip</p>
-            <p>Space — play / pause</p>
-            <p>Ctrl+Z — undo · Ctrl+Shift+Z — redo</p>
-            <p>Drag clip edges to trim</p>
+            <p className="font-medium text-foreground/80">Keyboard shortcuts</p>
+            <p>Ctrl+B — split · Del — delete</p>
+            <p>Ctrl+Z / Ctrl+Shift+Z — undo / redo</p>
+            <p>Ctrl+C / V / D — copy / paste / duplicate</p>
+            <p>Space — play · ←/→ — frame step</p>
+            <p>Shift+←/→ — 10 frames · Home/End — start/end</p>
+            <p>↑/↓ — tracks · M — marker · Ctrl+S — save</p>
+            <button
+              type="button"
+              className="text-primary hover:underline"
+              onClick={() => setShortcutsOpen(true)}
+            >
+              View all shortcuts…
+            </button>
           </div>
 
           {error && <p className="text-xs text-red-400">{error}</p>}
         </aside>
       </div>
+
+      <Dialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} title="Keyboard Shortcuts (Desktop)">
+        <p className="text-xs text-muted mb-2 font-medium">Editing</p>
+        <DialogRow label="Split clip at playhead" keys="Ctrl/Cmd + B" />
+        <DialogRow label="Delete selected clip" keys="Delete / Backspace" />
+        <DialogRow label="Undo / Redo" keys="Ctrl/Cmd + Z / Ctrl/Cmd + Shift + Z" />
+        <DialogRow label="Copy / Paste" keys="Ctrl/Cmd + C / Ctrl/Cmd + V" />
+        <DialogRow label="Duplicate" keys="Ctrl/Cmd + D" />
+        <p className="text-xs text-muted mt-4 mb-2 font-medium">Playback</p>
+        <DialogRow label="Play / Pause" keys="Space" />
+        <DialogRow label="Step frame back / forward" keys="← / →" />
+        <DialogRow label="Jump multiple frames" keys="Shift + ← / →" />
+        <DialogRow label="Jump to start / end" keys="Home / End" />
+        <p className="text-xs text-muted mt-4 mb-2 font-medium">Timeline navigation</p>
+        <DialogRow label="Zoom timeline in / out" keys="Ctrl/Cmd + Scroll or + / −" />
+        <DialogRow label="Move between tracks" keys="↑ / ↓" />
+        <p className="text-xs text-muted mt-4 mb-2 font-medium">Markers / Tools</p>
+        <DialogRow label="Add marker at playhead" keys="M" />
+        <DialogRow label="Save project" keys="Ctrl/Cmd + S" />
+      </Dialog>
     </div>
   )
 }

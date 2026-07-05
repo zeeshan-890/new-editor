@@ -129,3 +129,40 @@ export async function hydrateGenerationDraft(
 
   return draft
 }
+
+function generationFileName(generation: ProjectGeneration): string {
+  const fromUrl = generation.url.match(/\.(mp4|webm|mov|png|jpe?g|webp|gif)(\?|$)/i)?.[1]
+  const ext =
+    fromUrl ?? (generation.type === 'video' ? 'mp4' : 'png')
+  return `generation-${generation.id.slice(0, 8)}.${ext}`
+}
+
+export async function ensureGenerationMediaInProject(
+  projectId: string,
+  generation: ProjectGeneration
+): Promise<{ localPath: string; name: string }> {
+  if (
+    generation.localPath &&
+    existsSync(generation.localPath) &&
+    isInProjectMedia(projectId, generation.localPath)
+  ) {
+    return { localPath: generation.localPath, name: generationFileName(generation) }
+  }
+
+  if (generation.localPath && existsSync(generation.localPath)) {
+    const imported = await importMediaToProject(projectId, generation.localPath)
+    return { localPath: imported.localPath, name: imported.name || generationFileName(generation) }
+  }
+
+  if (isHttpUrl(generation.url)) {
+    const temp = await downloadMedia(generation.url)
+    try {
+      const imported = await importMediaToProject(projectId, temp)
+      return { localPath: imported.localPath, name: imported.name || generationFileName(generation) }
+    } finally {
+      await removeTempFile(temp)
+    }
+  }
+
+  throw new Error(`Could not import generation "${generation.id}" into project media.`)
+}

@@ -8,6 +8,7 @@ import { pipeline } from 'stream/promises'
 import https from 'https'
 import http from 'http'
 import { logError, logWarn } from '../logger'
+import { spawnablePath, packagedNodeModulePath } from '../appPaths'
 import { HiggsfieldCliError } from './errors'
 import { parseHiggsfieldJson } from './json-output'
 
@@ -28,9 +29,12 @@ function vendorRelativeToMain(): string {
 
 function resolveViaEnvOrBundled(): string | null {
   const envPath = process.env.HIGGSFIELD_CLI_PATH
-  if (envPath && existsSync(envPath)) return envPath
+  if (envPath && existsSync(envPath)) return spawnablePath(envPath)
 
-  const bundled = vendorRelativeToMain()
+  const packaged = packagedNodeModulePath('@higgsfield', 'cli', 'vendor', HF_BIN)
+  if (packaged) return packaged
+
+  const bundled = spawnablePath(vendorRelativeToMain())
   if (existsSync(bundled)) return bundled
 
   return null
@@ -51,7 +55,7 @@ function resolveViaPackageJson(): string | null {
     try {
       const req = createRequire(pkgJson)
       const pkgPath = req.resolve('@higgsfield/cli/package.json')
-      const bin = join(dirname(pkgPath), 'vendor', HF_BIN)
+      const bin = spawnablePath(join(dirname(pkgPath), 'vendor', HF_BIN))
       if (existsSync(bin)) return bin
     } catch {
       // try next root
@@ -70,7 +74,8 @@ function resolveViaDirectPaths(): string | null {
   ]
 
   for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate
+    const bin = spawnablePath(candidate)
+    if (existsSync(bin)) return bin
   }
 
   return null

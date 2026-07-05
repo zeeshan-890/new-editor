@@ -2,7 +2,7 @@ import { HIGGSFIELD_DRAG_MIME } from '@shared/types'
 import type { ProjectGeneration } from '@shared/types'
 
 export interface GalleryDragPayload {
-  type: 'higgsfield-image'
+  type: 'higgsfield-image' | 'higgsfield-video'
   url?: string
   localPath?: string
   jobId?: string
@@ -13,7 +13,7 @@ export function parseGalleryDragPayload(data: string): GalleryDragPayload | null
   if (!data) return null
   try {
     const parsed = JSON.parse(data) as GalleryDragPayload
-    if (parsed?.type === 'higgsfield-image') return parsed
+    if (parsed?.type === 'higgsfield-image' || parsed?.type === 'higgsfield-video') return parsed
   } catch {
     // ignore
   }
@@ -27,10 +27,11 @@ export function galleryDragPayloadFromDataTransfer(
 }
 
 export function setGalleryDragData(dataTransfer: DataTransfer, item: ProjectGeneration): void {
+  const isVideo = item.type === 'video' || /\.(mp4|webm|mov)(\?|$)/i.test(item.url)
   dataTransfer.setData(
     HIGGSFIELD_DRAG_MIME,
     JSON.stringify({
-      type: 'higgsfield-image',
+      type: isVideo ? 'higgsfield-video' : 'higgsfield-image',
       url: item.url,
       localPath: item.localPath,
       jobId: item.id,
