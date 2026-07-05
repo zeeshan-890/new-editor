@@ -1,5 +1,14 @@
 import { create } from 'zustand'
-import type { MediaAsset, MediaAssetType, TimelineClip, TimelineLayer, VideoEditorProject, WaveformPeaks } from '@shared/types'
+import type {
+  MediaAsset,
+  MediaAssetType,
+  SilenceRegion,
+  TimelineClip,
+  TimelineLayer,
+  VideoEditorProject,
+  VideoFilmstrip,
+  WaveformPeaks
+} from '@shared/types'
 import {
   clipDurationMs,
   createEmptyVideoEditorProject,
@@ -12,7 +21,10 @@ import { usePlaybackStore } from './playbackStore'
 export interface AssetWaveform {
   sampleRate: number
   peaks: WaveformPeaks
+  durationMs: number
 }
+
+export const EMPTY_SILENCE_REGIONS: SilenceRegion[] = []
 
 interface HistorySnapshot {
   layers: TimelineLayer[]
@@ -80,6 +92,75 @@ function insertLayer(layers: TimelineLayer[], layer: TimelineLayer): TimelineLay
   return next
 }
 
+function layerTypeForAsset(assetType: MediaAssetType): TimelineLayer['type'] {
+  if (assetType === 'audio') return 'audio'
+  if (assetType === 'image') return 'overlay'
+  return 'video'
+}
+
+function createLayerOfType(type: TimelineLayer['type'], layers: TimelineLayer[]): TimelineLayer {
+  const count = layers.filter((l) => l.type === type).length + 1
+  const label = type === 'video' ? 'Video' : type === 'audio' ? 'Audio' : 'Overlay'
+  return {
+    id: generateId(),
+    name: `${label} ${count}`,
+    type,
+    clips: [],
+    locked: false,
+    muted: false
+  }
+}
+
+function compatibleLayerIndices(layers: TimelineLayer[], assetType: MediaAssetType): number[] {
+  return layers
+    .map((layer, index) => (isLayerCompatible(layer, assetType) && !layer.locked ? index : -1))
+    .filter((index) => index >= 0)
+}
+
+function resolveDropTarget(
+  layers: TimelineLayer[],
+  assetType: MediaAssetType,
+  visualIndex: number
+): { layerId: string | null; insertIndex: number; createNew: boolean; layerType: TimelineLayer['type'] } {
+  const layerType = layerTypeForAsset(assetType)
+  const compatible = compatibleLayerIndices(layers, assetType)
+
+  if (compatible.length === 0) {
+    const insertIndex = layerType === 'video' ? 0 : layers.length
+    return { layerId: null, insertIndex, createNew: true, layerType }
+  }
+
+  const first = compatible[0]
+  const last = compatible[compatible.length - 1]
+
+  if (visualIndex < first) {
+    return { layerId: null, insertIndex: first, createNew: true, layerType }
+  }
+
+  if (visualIndex > last) {
+    return { layerId: null, insertIndex: last + 1, createNew: true, layerType }
+  }
+
+  if (isLayerCompatible(layers[visualIndex], assetType) && !layers[visualIndex].locked) {
+    return {
+      layerId: layers[visualIndex].id,
+      insertIndex: visualIndex,
+      createNew: false,
+      layerType
+    }
+  }
+
+  const nearest = compatible.reduce((best, index) =>
+    Math.abs(index - visualIndex) < Math.abs(best - visualIndex) ? index : best
+  )
+  return {
+    layerId: layers[nearest].id,
+    insertIndex: nearest,
+    createNew: false,
+    layerType
+  }
+}
+
 export const useVideoEditorStore = create<{
   project: VideoEditorProject
   undoStack: HistorySnapshot[]
@@ -87,6 +168,9 @@ export const useVideoEditorStore = create<{
   durationMs: number
   waveformCache: Record<string, AssetWaveform>
   waveformLoading: Record<string, boolean>
+  filmstripCache: Record<string, VideoFilmstrip>
+  filmstripLoading: Record<string, boolean>
+  silenceRegionsByClipId: Record<string, SilenceRegion[]>
 
   resetProject: () => void
   pushHistory: () => void
@@ -94,6 +178,10 @@ export const useVideoEditorStore = create<{
   redo: () => void
   addAsset: (asset: Omit<MediaAsset, 'id'>) => MediaAsset
   loadWaveformForAsset: (assetId: string, filePath: string) => Promise<void>
+  syncAssetDuration: (assetId: string, durationMs: number) => void
+  setClipSilenceRegions: (clipId: string, regions: SilenceRegion[]) => void
+  clearClipSilenceRegions: (clipId: string) => void
+  loadFilmstripForAsset: (assetId: string, asset: Pick<MediaAsset, 'path' | 'durationMs' | 'type'>) => Promise<void>
   addLayer: (type?: TimelineLayer['type']) => void
   removeLayer: (layerId: string) => void
   toggleLayerMute: (layerId: string) => void
@@ -107,6 +195,7 @@ export const useVideoEditorStore = create<{
   trimSelectedClip: (edge: 'in' | 'out', deltaMs: number) => void
   deleteSelectedClip: () => void
   moveSelectedClip: (timelineStartMs: number) => void
+  moveSelectedClipToPosition: (timelineStartMs: number, visualLayerIndex: number) => void
   replaceClipWithAsset: (clipId: string, assetInput: Omit<MediaAsset, 'id'>) => void
   clipsAtPlayhead: (timeMs: number) => Array<{ clip: TimelineClip; layer: TimelineLayer; asset: MediaAsset }>
   getSelectedClip: () => { clip: TimelineClip; layer: TimelineLayer; asset: MediaAsset } | null
@@ -120,6 +209,9 @@ export const useVideoEditorStore = create<{
   durationMs: 1000,
   waveformCache: {},
   waveformLoading: {},
+  filmstripCache: {},
+  filmstripLoading: {},
+  silenceRegionsByClipId: {},
 
   resetProject: () =>
     set({
@@ -128,7 +220,10 @@ export const useVideoEditorStore = create<{
       redoStack: [],
       durationMs: 1000,
       waveformCache: {},
-      waveformLoading: {}
+      waveformLoading: {},
+      filmstripCache: {},
+      filmstripLoading: {},
+      silenceRegionsByClipId: {}
     }),
 
   pushHistory: () => {
@@ -180,7 +275,36 @@ export const useVideoEditorStore = create<{
     if (asset.type === 'audio' || asset.type === 'video') {
       void get().loadWaveformForAsset(asset.id, asset.path)
     }
+    if (asset.type === 'video' || asset.type === 'image') {
+      void get().loadFilmstripForAsset(asset.id, asset)
+    }
     return asset
+  },
+
+  loadFilmstripForAsset: async (assetId, asset) => {
+    const { filmstripCache, filmstripLoading } = get()
+    if (filmstripCache[assetId] || filmstripLoading[assetId]) return
+    if (!window.electronAPI?.getVideoFilmstrip) return
+
+    set((state) => ({
+      filmstripLoading: { ...state.filmstripLoading, [assetId]: true }
+    }))
+
+    try {
+      const filmstrip = await window.electronAPI.getVideoFilmstrip({
+        filePath: asset.path,
+        durationMs: asset.durationMs,
+        type: asset.type
+      })
+      set((state) => ({
+        filmstripCache: { ...state.filmstripCache, [assetId]: filmstrip },
+        filmstripLoading: { ...state.filmstripLoading, [assetId]: false }
+      }))
+    } catch {
+      set((state) => ({
+        filmstripLoading: { ...state.filmstripLoading, [assetId]: false }
+      }))
+    }
   },
 
   loadWaveformForAsset: async (assetId, filePath) => {
@@ -194,21 +318,75 @@ export const useVideoEditorStore = create<{
 
     try {
       const result = await window.electronAPI.getAudioPeaks(filePath)
+      const prevDuration = get().durationMs
+      get().syncAssetDuration(assetId, result.durationMs)
       set((state) => ({
         waveformCache: {
           ...state.waveformCache,
           [assetId]: {
             sampleRate: result.sampleRate,
-            peaks: normalizePeaks(result.peaks)
+            peaks: normalizePeaks(result.peaks),
+            durationMs: result.durationMs
           }
         },
         waveformLoading: { ...state.waveformLoading, [assetId]: false }
       }))
+      if (get().durationMs > prevDuration * 1.05) {
+        usePlaybackStore.getState().fitTimelineView()
+      }
     } catch {
       set((state) => ({
         waveformLoading: { ...state.waveformLoading, [assetId]: false }
       }))
     }
+  },
+
+  setClipSilenceRegions: (clipId, regions) =>
+    set((state) => ({
+      silenceRegionsByClipId: { ...state.silenceRegionsByClipId, [clipId]: regions }
+    })),
+
+  clearClipSilenceRegions: (clipId) =>
+    set((state) => {
+      const { [clipId]: _, ...silenceRegionsByClipId } = state.silenceRegionsByClipId
+      return { silenceRegionsByClipId }
+    }),
+
+  syncAssetDuration: (assetId, durationMs) => {
+    if (!Number.isFinite(durationMs) || durationMs <= 0) return
+
+    const { project } = get()
+    const asset = project.assets.find((a) => a.id === assetId)
+    if (!asset) return
+    if (Math.abs(asset.durationMs - durationMs) < 50) return
+
+    const prevMs = asset.durationMs
+
+    set((state) => {
+      const assets = state.project.assets.map((a) =>
+        a.id === assetId ? { ...a, durationMs } : a
+      )
+      const layers = state.project.layers.map((layer) => ({
+        ...layer,
+        clips: layer.clips.map((clip) => {
+          if (clip.assetId !== assetId) return clip
+          const wasFullLength =
+            clip.sourceInMs === 0 && Math.abs(clip.sourceOutMs - prevMs) < 200
+          if (wasFullLength) {
+            return { ...clip, sourceOutMs: durationMs }
+          }
+          return {
+            ...clip,
+            sourceInMs: Math.min(clip.sourceInMs, Math.max(0, durationMs - 100)),
+            sourceOutMs: Math.min(clip.sourceOutMs, durationMs)
+          }
+        })
+      }))
+      return {
+        project: { ...state.project, assets, layers },
+        durationMs: sequenceDurationMs(layers)
+      }
+    })
   },
 
   addLayer: (type = 'video') => {
@@ -442,35 +620,111 @@ export const useVideoEditorStore = create<{
         ...l,
         clips: l.clips.filter((c) => c.id !== clipId)
       }))
+      const { [clipId]: _, ...silenceRegionsByClipId } = state.silenceRegionsByClipId
       return {
         project: {
           ...state.project,
           layers,
           selectedClipId: state.project.selectedClipId === clipId ? null : state.project.selectedClipId
         },
-        durationMs: sequenceDurationMs(layers)
+        durationMs: sequenceDurationMs(layers),
+        silenceRegionsByClipId
       }
     })
   },
 
   moveSelectedClip: (timelineStartMs) => {
+    get().moveSelectedClipToPosition(timelineStartMs, -1)
+  },
+
+  moveSelectedClipToPosition: (timelineStartMs, visualLayerIndex) => {
     const { project } = get()
-    if (!project.selectedClipId) return
-    const layer = project.layers.find((l) => l.clips.some((c) => c.id === project.selectedClipId))
-    if (layer?.locked) return
-    set((state) => {
-      const layers = state.project.layers.map((l) => ({
+    const clipId = project.selectedClipId
+    if (!clipId) return
+
+    let clip: TimelineClip | undefined
+    let sourceLayer: TimelineLayer | undefined
+    let asset: MediaAsset | undefined
+
+    for (const layer of project.layers) {
+      const hit = layer.clips.find((c) => c.id === clipId)
+      if (!hit) continue
+      clip = hit
+      sourceLayer = layer
+      asset = project.assets.find((a) => a.id === hit.assetId)
+      break
+    }
+
+    if (!clip || !sourceLayer || !asset || sourceLayer.locked) return
+
+    const startMs = Math.max(0, timelineStartMs)
+    const sourceLayerId = sourceLayer.id
+
+    if (visualLayerIndex < 0) {
+      set((state) => {
+        const layers = state.project.layers.map((l) => ({
+          ...l,
+          clips: l.clips.map((c) =>
+            c.id === clipId ? { ...c, timelineStartMs: startMs } : c
+          )
+        }))
+        return {
+          project: { ...state.project, layers },
+          durationMs: sequenceDurationMs(layers)
+        }
+      })
+      return
+    }
+
+    const target = resolveDropTarget(project.layers, asset.type, visualLayerIndex)
+    let layers = cloneLayers(project.layers)
+
+    let targetLayerId = target.layerId
+
+    if (target.createNew) {
+      const newLayer = createLayerOfType(target.layerType, layers)
+      layers.splice(clamp(target.insertIndex, 0, layers.length), 0, newLayer)
+      targetLayerId = newLayer.id
+    }
+
+    if (!targetLayerId) return
+
+    const targetLayer = layers.find((l) => l.id === targetLayerId)
+    if (!targetLayer || targetLayer.locked || !isLayerCompatible(targetLayer, asset.type)) return
+
+    if (targetLayerId === sourceLayerId) {
+      layers = layers.map((l) => ({
         ...l,
         clips: l.clips.map((c) =>
-          c.id === state.project.selectedClipId
-            ? { ...c, timelineStartMs: Math.max(0, timelineStartMs) }
-            : c
+          c.id === clipId ? { ...c, timelineStartMs: startMs, layerId: targetLayerId! } : c
         )
       }))
-      return {
-        project: { ...state.project, layers },
-        durationMs: sequenceDurationMs(layers)
+    } else {
+      const movingClip = { ...clip, timelineStartMs: startMs, layerId: targetLayerId }
+      layers = layers.map((l) => {
+        if (l.id === sourceLayerId) {
+          return { ...l, clips: l.clips.filter((c) => c.id !== clipId) }
+        }
+        if (l.id === targetLayerId) {
+          return { ...l, clips: [...l.clips, movingClip] }
+        }
+        return l
+      })
+
+      const emptied = layers.find((l) => l.id === sourceLayerId)
+      if (emptied && emptied.clips.length === 0) {
+        layers = layers.filter((l) => l.id !== sourceLayerId)
       }
+    }
+
+    set({
+      project: {
+        ...project,
+        layers,
+        selectedClipId: clipId,
+        selectedLayerId: targetLayerId
+      },
+      durationMs: sequenceDurationMs(layers)
     })
   },
 
@@ -491,6 +745,7 @@ export const useVideoEditorStore = create<{
             : c
         )
       }))
+      const { [clipId]: _, ...silenceRegionsByClipId } = state.silenceRegionsByClipId
       return {
         project: {
           ...state.project,
@@ -498,10 +753,16 @@ export const useVideoEditorStore = create<{
           layers,
           selectedClipId: clipId
         },
-        durationMs: sequenceDurationMs(layers)
+        durationMs: sequenceDurationMs(layers),
+        silenceRegionsByClipId
       }
     })
-    void get().loadWaveformForAsset(asset.id, asset.path)
+    if (asset.type === 'audio' || asset.type === 'video') {
+      void get().loadWaveformForAsset(asset.id, asset.path)
+    }
+    if (asset.type === 'video' || asset.type === 'image') {
+      void get().loadFilmstripForAsset(asset.id, asset)
+    }
   },
 
   clipsAtPlayhead: (timeMs) => {
