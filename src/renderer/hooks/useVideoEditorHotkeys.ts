@@ -8,7 +8,7 @@ import {
 
 const HOTKEY_OPTS = { enableOnFormTags: false, preventDefault: true } as const
 
-export function useVideoEditorHotkeys(): void {
+export function useVideoEditorHotkeys(options?: { onExport?: () => void }): void {
   const splitClipAtPlayhead = useVideoEditorStore((s) => s.splitClipAtPlayhead)
   const deleteSelectedClip = useVideoEditorStore((s) => s.deleteSelectedClip)
   const undo = useVideoEditorStore((s) => s.undo)
@@ -103,6 +103,13 @@ export function useVideoEditorHotkeys(): void {
     },
     { ...HOTKEY_OPTS },
     [saveProjectToFile]
+  )
+
+  useHotkeys(
+    'mod+e',
+    () => options?.onExport?.(),
+    { ...HOTKEY_OPTS },
+    [options?.onExport]
   )
 
   useHotkeys(
