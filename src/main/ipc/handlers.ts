@@ -53,6 +53,7 @@ import type {
 import { getLogFilePath, logError } from '../logger'
 import { probeMediaFile } from '../video/probe'
 import { exportVideoSequence } from '../video/export'
+import type { VideoExportOptions } from '../../shared/videoExport'
 import { filmstripForImage, generateVideoFilmstrip } from '../video/filmstrip'
 import { downloadMedia } from '../higgsfield/cli'
 import {
@@ -111,12 +112,24 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       filters: [
         { name: 'WAV', extensions: ['wav'] },
         { name: 'MP3', extensions: ['mp3'] },
-        { name: 'FLAC', extensions: ['flac'] },
-        { name: 'MP4 Video', extensions: ['mp4'] },
-        { name: 'WebM Video', extensions: ['webm'] }
+        { name: 'FLAC', extensions: ['flac'] }
       ]
     })
     return result.canceled ? null : result.filePath
+  })
+
+  ipcMain.handle(IPC.SAVE_VIDEO_FILE, async (_e, defaultName: string) => {
+    const win = getWindow()
+    const baseName = defaultName.replace(/\.[^.]+$/, '')
+    const result = await dialog.showSaveDialog(win ?? undefined, {
+      defaultPath: `${baseName}.mp4`,
+      filters: [{ name: 'MP4 Video', extensions: ['mp4'] }]
+    })
+    if (result.canceled || !result.filePath) return null
+    const filePath = result.filePath.toLowerCase().endsWith('.mp4')
+      ? result.filePath
+      : `${result.filePath.replace(/\.[^.]+$/, '')}.mp4`
+    return filePath
   })
 
   ipcMain.handle(IPC.VIDEO_EDITOR_PROJECT_SAVE, async (_e, project: VideoEditorProject) => {
@@ -234,8 +247,13 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     IPC.VIDEO_EXPORT,
     async (
       _e,
-      payload: { assets: MediaAsset[]; layers: TimelineLayer[]; outputPath: string }
-    ) => exportVideoSequence(payload.assets, payload.layers, payload.outputPath)
+      payload: {
+        assets: MediaAsset[]
+        layers: TimelineLayer[]
+        outputPath: string
+        options?: VideoExportOptions
+      }
+    ) => exportVideoSequence(payload.assets, payload.layers, payload.outputPath, payload.options)
   )
 
   ipcMain.handle(
