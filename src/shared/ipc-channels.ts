@@ -1,6 +1,7 @@
 export const IPC = {
   OPEN_FILE: 'dialog:open-file',
   SAVE_FILE: 'dialog:save-file',
+  SAVE_VIDEO_FILE: 'dialog:save-video-file',
   LOAD_AUDIO: 'audio:load',
   AUDIO_PEAKS: 'audio:peaks',
   DETECT_SILENCE: 'detection:run',
