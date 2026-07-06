@@ -34,6 +34,7 @@ export interface ElectronAPI {
   openFile: () => Promise<string | null>
   openImageFile: () => Promise<string | null>
   saveFile: (defaultName: string) => Promise<string | null>
+  saveVideoFile: (defaultName: string) => Promise<string | null>
   loadAudio: (filePath: string) => Promise<LoadedAudioProject>
   getAudioPeaks: (filePath: string) => Promise<{ sampleRate: number; peaks: WaveformPeaks; durationMs: number }>
   detectSilence: (params: DetectionParams) => Promise<DetectionResult>
@@ -101,6 +102,7 @@ export interface ElectronAPI {
     assets: MediaAsset[]
     layers: TimelineLayer[]
     outputPath: string
+    options?: import('../shared/videoExport').VideoExportOptions
   }) => Promise<{ outputPath: string; durationMs: number }>
   saveMediaAs: (payload: {
     url?: string
@@ -120,6 +122,7 @@ const api: ElectronAPI = {
   openFile: () => ipcRenderer.invoke(IPC.OPEN_FILE),
   openImageFile: () => ipcRenderer.invoke(IPC.OPEN_IMAGE_FILE),
   saveFile: (defaultName) => ipcRenderer.invoke(IPC.SAVE_FILE, defaultName),
+  saveVideoFile: (defaultName) => ipcRenderer.invoke(IPC.SAVE_VIDEO_FILE, defaultName),
   loadAudio: (filePath) => ipcRenderer.invoke(IPC.LOAD_AUDIO, filePath),
   getAudioPeaks: (filePath) => ipcRenderer.invoke(IPC.AUDIO_PEAKS, filePath),
   detectSilence: (params) => ipcRenderer.invoke(IPC.DETECT_SILENCE, params),
