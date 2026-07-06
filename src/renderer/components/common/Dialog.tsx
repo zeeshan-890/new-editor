@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom'
 import { cn } from '@renderer/lib/utils'
 
 export function Dialog({
@@ -13,10 +14,10 @@ export function Dialog({
 }): React.JSX.Element | null {
   if (!open) return null
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+  return createPortal(
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className="relative z-10 w-full max-w-lg rounded-lg border border-border bg-card p-6 shadow-xl">
+      <div className="relative z-10 w-full max-w-lg rounded-lg border border-border bg-card p-6 shadow-xl mx-4">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold">{title}</h2>
           <button onClick={onClose} className="text-muted hover:text-foreground text-xl leading-none">
@@ -25,7 +26,8 @@ export function Dialog({
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
