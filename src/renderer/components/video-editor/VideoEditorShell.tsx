@@ -16,12 +16,20 @@ import { Label } from '../common/Label'
 import { Dialog, DialogRow } from '../common/Dialog'
 import { VideoTimeline, localMediaUrl } from './VideoTimeline'
 import { VideoAudioSilencePanel } from './VideoAudioSilencePanel'
+import { VideoInspectorTabs, type VideoInspectorTab } from './VideoInspectorTabs'
+import { VideoExportPanel } from './VideoExportPanel'
 import { useVideoEditorStore } from '@renderer/stores/videoEditorStore'
 import { usePlaybackStore } from '@renderer/stores/playbackStore'
 import { useVideoEditorHotkeys } from '@renderer/hooks/useVideoEditorHotkeys'
 import { useVideoEditorPlayback } from '@renderer/hooks/useVideoEditorPlayback'
 import { clipDurationMs } from '@shared/types'
 import { formatTime } from '@renderer/lib/utils'
+import {
+  DEFAULT_VIDEO_EXPORT_OPTIONS,
+  VIDEO_EXPORT_PRESETS,
+  VIDEO_EXPORT_QUALITY,
+  suggestExportPreset
+} from '@shared/videoExport'
 import {
   allowFileDrop,
   filePathFromDrop,
@@ -77,8 +85,6 @@ export function VideoEditorShell({
   const visualClipAtPlayhead = useVideoEditorStore((s) => s.visualClipAtPlayhead)
   const audioClipAtPlayhead = useVideoEditorStore((s) => s.audioClipAtPlayhead)
 
-  useVideoEditorHotkeys()
-
   const playheadMs = usePlaybackStore((s) => s.playheadMs)
   const isPlaying = usePlaybackStore((s) => s.isPlaying)
   const setPlayheadMs = usePlaybackStore((s) => s.setPlayheadMs)
@@ -99,6 +105,12 @@ export function VideoEditorShell({
   const [importing, setImporting] = useState(false)
   const [importingGenerationId, setImportingGenerationId] = useState<string | null>(null)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [inspectorTab, setInspectorTab] = useState<VideoInspectorTab>('inspector')
+  const [exporting, setExporting] = useState(false)
+  const [exportPresetId, setExportPresetId] = useState('1080p-vertical')
+  const [exportQualityId, setExportQualityId] = useState<(typeof VIDEO_EXPORT_QUALITY)[number]['id']>('medium')
+  const [includeVideoLayerAudio, setIncludeVideoLayerAudio] = useState(true)
+  const [exportSuccess, setExportSuccess] = useState<string | null>(null)
 
   useEffect(() => {
     return window.electronAPI?.onShowShortcuts(() => setShortcutsOpen(true))
@@ -284,19 +296,62 @@ export function VideoEditorShell({
     [addClipToLayer]
   )
 
-  const handleExport = useCallback(async () => {
-    const outputPath = await window.electronAPI?.saveFile('export.mp4')
+  const openExportPanel = useCallback(() => {
+    const suggested = suggestExportPreset(project.assets, project.layers)
+    setExportPresetId(suggested.id)
+    setExportQualityId('medium')
+    setIncludeVideoLayerAudio(true)
+    setExportSuccess(null)
+    setError(null)
+    setInspectorTab('export')
+  }, [project.assets, project.layers])
+
+  const runExport = useCallback(async (): Promise<void> => {
+    const preset = VIDEO_EXPORT_PRESETS.find((p) => p.id === exportPresetId) ?? VIDEO_EXPORT_PRESETS[0]
+    const quality =
+      VIDEO_EXPORT_QUALITY.find((q) => q.id === exportQualityId) ?? VIDEO_EXPORT_QUALITY[1]
+
+    const defaultName = `${project.name || 'export'}.mp4`.replace(/[<>:"/\\|?*]/g, '_')
+    const outputPath = await window.electronAPI?.saveVideoFile(defaultName)
     if (!outputPath || !window.electronAPI?.exportVideoSequence) return
+
+    setExporting(true)
+    setError(null)
+    setExportSuccess(null)
+
     try {
-      await window.electronAPI.exportVideoSequence({
+      const result = await window.electronAPI.exportVideoSequence({
         assets: project.assets,
         layers: project.layers,
-        outputPath
+        outputPath,
+        options: {
+          width: preset.width,
+          height: preset.height,
+          fps: DEFAULT_VIDEO_EXPORT_OPTIONS.fps,
+          crf: quality.crf,
+          includeVideoLayerAudio
+        }
       })
+      setExportSuccess(`Exported ${formatTime(result.durationMs, false)} → ${outputPath}`)
     } catch (err) {
-      setError(String(err))
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setExporting(false)
     }
-  }, [project.assets, project.layers])
+  }, [
+    exportPresetId,
+    exportQualityId,
+    includeVideoLayerAudio,
+    project.assets,
+    project.layers,
+    project.name
+  ])
+
+  useVideoEditorHotkeys({ onExport: openExportPanel })
+
+  useEffect(() => {
+    return window.electronAPI?.onMenuExport(() => openExportPanel())
+  }, [openExportPanel])
 
   return (
     <div
@@ -492,8 +547,8 @@ export function VideoEditorShell({
             <Button size="sm" variant="outline" onClick={deleteSelectedClip}>
               <Trash2 size={14} />
             </Button>
-            <Button size="sm" onClick={() => void handleExport()}>
-              Export
+            <Button size="sm" onClick={openExportPanel} disabled={exporting}>
+              {exporting ? 'Exporting…' : 'Export'}
             </Button>
           </div>
 
@@ -502,106 +557,129 @@ export function VideoEditorShell({
           </div>
         </main>
 
-        <aside className="w-64 border-l border-border bg-card p-3 space-y-4 shrink-0 overflow-y-auto">
-          <div>
-            <Label>Layers</Label>
-            <div className="mt-2 space-y-1">
-              {project.layers.map((layer) => (
-                <button
-                  key={layer.id}
-                  type="button"
-                  onClick={() => selectLayer(layer.id)}
-                  className={`w-full text-xs flex items-center justify-between rounded px-2 py-1.5 border ${
-                    layer.id === selectedLayerId
-                      ? 'border-primary bg-primary/10 text-foreground'
-                      : 'border-transparent text-muted hover:bg-background'
-                  }`}
-                >
-                  <span className="truncate">{layer.name}</span>
-                  <span className="shrink-0 ml-2 tabular-nums">
-                    {layer.clips.length}
-                    {layer.muted ? ' · M' : ''}
-                    {layer.locked ? ' · L' : ''}
-                  </span>
-                </button>
-              ))}
-            </div>
-            <Button size="sm" variant="outline" className="w-full mt-2" onClick={() => addLayer('video')}>
-              <Layers size={14} className="mr-1" /> Video layer
-            </Button>
-            <Button size="sm" variant="outline" className="w-full mt-1" onClick={() => addLayer('overlay')}>
-              <Layers size={14} className="mr-1" /> Overlay layer
-            </Button>
-            <Button size="sm" variant="outline" className="w-full mt-1" onClick={() => addLayer('audio')}>
-              <Layers size={14} className="mr-1" /> Audio layer
-            </Button>
-            {selectedLayerId && (
-              <div className="flex gap-1 mt-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="flex-1 text-[10px]"
-                  onClick={() => toggleLayerMute(selectedLayerId)}
-                >
-                  Mute
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="flex-1 text-[10px]"
-                  onClick={() => toggleLayerLock(selectedLayerId)}
-                >
-                  Lock
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="flex-1 text-[10px]"
-                  onClick={() => removeLayer(selectedLayerId)}
-                >
-                  Remove
-                </Button>
+        <aside className="w-64 border-l border-border bg-card flex flex-col shrink-0 min-h-0">
+          <VideoInspectorTabs active={inspectorTab} onChange={setInspectorTab} />
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {inspectorTab === 'export' ? (
+              <VideoExportPanel
+                layers={project.layers}
+                exportPresetId={exportPresetId}
+                exportQualityId={exportQualityId}
+                includeVideoLayerAudio={includeVideoLayerAudio}
+                exporting={exporting}
+                exportSuccess={exportSuccess}
+                onPresetChange={setExportPresetId}
+                onQualityChange={setExportQualityId}
+                onIncludeVideoLayerAudioChange={setIncludeVideoLayerAudio}
+                onExport={() => void runExport()}
+              />
+            ) : (
+              <div className="p-3 space-y-4">
+                <div>
+                  <Label>Layers</Label>
+                  <div className="mt-2 space-y-1">
+                    {project.layers.map((layer) => (
+                      <button
+                        key={layer.id}
+                        type="button"
+                        onClick={() => selectLayer(layer.id)}
+                        className={`w-full text-xs flex items-center justify-between rounded px-2 py-1.5 border ${
+                          layer.id === selectedLayerId
+                            ? 'border-primary bg-primary/10 text-foreground'
+                            : 'border-transparent text-muted hover:bg-background'
+                        }`}
+                      >
+                        <span className="truncate">{layer.name}</span>
+                        <span className="shrink-0 ml-2 tabular-nums">
+                          {layer.clips.length}
+                          {layer.muted ? ' · M' : ''}
+                          {layer.locked ? ' · L' : ''}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                  <Button size="sm" variant="outline" className="w-full mt-2" onClick={() => addLayer('video')}>
+                    <Layers size={14} className="mr-1" /> Video layer
+                  </Button>
+                  <Button size="sm" variant="outline" className="w-full mt-1" onClick={() => addLayer('overlay')}>
+                    <Layers size={14} className="mr-1" /> Overlay layer
+                  </Button>
+                  <Button size="sm" variant="outline" className="w-full mt-1" onClick={() => addLayer('audio')}>
+                    <Layers size={14} className="mr-1" /> Audio layer
+                  </Button>
+                  {selectedLayerId && (
+                    <div className="flex gap-1 mt-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="flex-1 text-[10px]"
+                        onClick={() => toggleLayerMute(selectedLayerId)}
+                      >
+                        Mute
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="flex-1 text-[10px]"
+                        onClick={() => toggleLayerLock(selectedLayerId)}
+                      >
+                        Lock
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="flex-1 text-[10px]"
+                        onClick={() => removeLayer(selectedLayerId)}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  )}
+                </div>
+
+                {selected && (
+                  <div className="rounded border border-border p-2 space-y-1 text-xs">
+                    <p className="font-medium">Selected clip</p>
+                    <p className="text-muted truncate">{selected.asset.name}</p>
+                    <p className="text-muted capitalize">{selected.layer.type} · {selected.layer.name}</p>
+                    <p>Start: {formatTime(selected.clip.timelineStartMs)}</p>
+                    <p>Duration: {formatTime(clipDurationMs(selected.clip))}</p>
+                    <p>In: {formatTime(selected.clip.sourceInMs)} · Out: {formatTime(selected.clip.sourceOutMs)}</p>
+                  </div>
+                )}
+
+                {selected?.asset.type === 'audio' && (
+                  <VideoAudioSilencePanel
+                    clipId={selected.clip.id}
+                    assetPath={selected.asset.path}
+                    onError={setError}
+                  />
+                )}
+
+                <div className="text-[10px] text-muted space-y-1">
+                  <p className="font-medium text-foreground/80">Keyboard shortcuts</p>
+                  <p>Ctrl+B — split · Del — delete</p>
+                  <p>Ctrl+Z / Ctrl+Shift+Z — undo / redo</p>
+                  <p>Ctrl+C / V / D — copy / paste / duplicate</p>
+                  <p>Space — play · ←/→ — frame step</p>
+                  <p>Shift+←/→ — 10 frames · Home/End — start/end</p>
+                  <p>↑/↓ — tracks · M — marker · Ctrl+S — save · Ctrl+E — export</p>
+                  <button
+                    type="button"
+                    className="text-primary hover:underline"
+                    onClick={() => setShortcutsOpen(true)}
+                  >
+                    View all shortcuts…
+                  </button>
+                </div>
+
+                {error && <p className="text-xs text-red-400">{error}</p>}
               </div>
             )}
           </div>
-
-          {selected && (
-            <div className="rounded border border-border p-2 space-y-1 text-xs">
-              <p className="font-medium">Selected clip</p>
-              <p className="text-muted truncate">{selected.asset.name}</p>
-              <p className="text-muted capitalize">{selected.layer.type} · {selected.layer.name}</p>
-              <p>Start: {formatTime(selected.clip.timelineStartMs)}</p>
-              <p>Duration: {formatTime(clipDurationMs(selected.clip))}</p>
-              <p>In: {formatTime(selected.clip.sourceInMs)} · Out: {formatTime(selected.clip.sourceOutMs)}</p>
-            </div>
+          {error && inspectorTab === 'export' && (
+            <p className="text-xs text-red-400 px-3 pb-3 shrink-0">{error}</p>
           )}
-
-          {selected?.asset.type === 'audio' && (
-            <VideoAudioSilencePanel
-              clipId={selected.clip.id}
-              assetPath={selected.asset.path}
-              onError={setError}
-            />
-          )}
-
-          <div className="text-[10px] text-muted space-y-1">
-            <p className="font-medium text-foreground/80">Keyboard shortcuts</p>
-            <p>Ctrl+B — split · Del — delete</p>
-            <p>Ctrl+Z / Ctrl+Shift+Z — undo / redo</p>
-            <p>Ctrl+C / V / D — copy / paste / duplicate</p>
-            <p>Space — play · ←/→ — frame step</p>
-            <p>Shift+←/→ — 10 frames · Home/End — start/end</p>
-            <p>↑/↓ — tracks · M — marker · Ctrl+S — save</p>
-            <button
-              type="button"
-              className="text-primary hover:underline"
-              onClick={() => setShortcutsOpen(true)}
-            >
-              View all shortcuts…
-            </button>
-          </div>
-
-          {error && <p className="text-xs text-red-400">{error}</p>}
         </aside>
       </div>
 
@@ -623,6 +701,7 @@ export function VideoEditorShell({
         <p className="text-xs text-muted mt-4 mb-2 font-medium">Markers / Tools</p>
         <DialogRow label="Add marker at playhead" keys="M" />
         <DialogRow label="Save project" keys="Ctrl/Cmd + S" />
+        <DialogRow label="Open export settings" keys="Ctrl/Cmd + E" />
       </Dialog>
     </div>
   )
