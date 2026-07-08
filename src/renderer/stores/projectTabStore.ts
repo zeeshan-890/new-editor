@@ -67,6 +67,11 @@ function draftsForTabs(
   return next
 }
 
+function projectIdForGenerationTab(tabs: AppTab[], tabId: string): string | null {
+  const tab = tabs.find((t) => t.id === tabId && t.kind === 'generation')
+  return tab?.projectId ?? null
+}
+
 export const useProjectTabStore = create<{
   tabs: AppTab[]
   activeTabId: string
@@ -224,14 +229,14 @@ export const useProjectTabStore = create<{
 
   openNewProjectTab: async () => {
     if (!window.electronAPI) return
-    const project = await window.electronAPI.createProject()
+    const project = normalizeGenerationProject(await window.electronAPI.createProject())
     const tab: AppTab = {
       id: generateId(),
       kind: 'generation',
       title: project.name,
       projectId: project.id
     }
-    const tabDrafts = { ...get().tabDrafts, [tab.id]: createEmptyTabComposerState() }
+    const tabDrafts = { ...get().tabDrafts, [tab.id]: normalizeTabComposerState(project.composer) }
     set((state) => ({
       tabs: [...state.tabs, tab],
       activeTabId: tab.id,
@@ -259,7 +264,7 @@ export const useProjectTabStore = create<{
       title: project.name,
       projectId: project.id
     }
-    const tabDrafts = { ...get().tabDrafts, [tab.id]: createEmptyTabComposerState() }
+    const tabDrafts = { ...get().tabDrafts, [tab.id]: normalizeTabComposerState(project.composer) }
     set((state) => ({
       tabs: [...state.tabs, tab],
       activeTabId: tab.id,
@@ -343,7 +348,12 @@ export const useProjectTabStore = create<{
     set((state) => {
       const current = state.projects[projectId]
       if (!current) return state
-      const updated = { ...current, ...patch, updatedAt: Date.now() }
+      const updated = {
+        ...current,
+        ...patch,
+        composer: patch.composer ? normalizeTabComposerState(patch.composer) : current.composer,
+        updatedAt: Date.now()
+      }
       const tabs = state.tabs.map((tab) =>
         tab.projectId === projectId ? { ...tab, title: updated.name } : tab
       )
@@ -358,42 +368,72 @@ export const useProjectTabStore = create<{
   updateTabDraft: (tabId, patch) => {
     set((state) => {
       const current = state.tabDrafts[tabId] ?? createEmptyTabComposerState()
-      const tabDrafts = { ...state.tabDrafts, [tabId]: { ...current, ...patch } }
+      const nextDraft = normalizeTabComposerState({ ...current, ...patch })
+      const tabDrafts = { ...state.tabDrafts, [tabId]: nextDraft }
+      const projectId = projectIdForGenerationTab(state.tabs, tabId)
+      let projects = state.projects
+      if (projectId && state.projects[projectId]) {
+        projects = {
+          ...state.projects,
+          [projectId]: { ...state.projects[projectId], composer: nextDraft, updatedAt: Date.now() }
+        }
+        scheduleProjectSave(projectId, get)
+      }
       scheduleSessionSave(get, state.tabs, state.activeTabId, tabDrafts)
-      return { tabDrafts }
+      return { tabDrafts, projects }
     })
   },
 
   updateModeDraft: (tabId, mode, patch) => {
     set((state) => {
       const current = state.tabDrafts[tabId] ?? createEmptyTabComposerState()
+      const nextDraft = normalizeTabComposerState({
+        ...current,
+        [mode]: { ...current[mode], ...patch }
+      })
       const tabDrafts = {
         ...state.tabDrafts,
-        [tabId]: {
-          ...current,
-          [mode]: { ...current[mode], ...patch }
+        [tabId]: nextDraft
+      }
+      const projectId = projectIdForGenerationTab(state.tabs, tabId)
+      let projects = state.projects
+      if (projectId && state.projects[projectId]) {
+        projects = {
+          ...state.projects,
+          [projectId]: { ...state.projects[projectId], composer: nextDraft, updatedAt: Date.now() }
         }
+        scheduleProjectSave(projectId, get)
       }
       scheduleSessionSave(get, state.tabs, state.activeTabId, tabDrafts)
-      return { tabDrafts }
+      return { tabDrafts, projects }
     })
   },
 
   appendImageAttachment: (tabId, media) => {
     set((state) => {
       const current = state.tabDrafts[tabId] ?? createEmptyTabComposerState()
+      const nextDraft = normalizeTabComposerState({
+        ...current,
+        image: {
+          ...current.image,
+          imageAttachments: [...current.image.imageAttachments, media]
+        }
+      })
       const tabDrafts = {
         ...state.tabDrafts,
-        [tabId]: {
-          ...current,
-          image: {
-            ...current.image,
-            imageAttachments: [...current.image.imageAttachments, media]
-          }
+        [tabId]: nextDraft
+      }
+      const projectId = projectIdForGenerationTab(state.tabs, tabId)
+      let projects = state.projects
+      if (projectId && state.projects[projectId]) {
+        projects = {
+          ...state.projects,
+          [projectId]: { ...state.projects[projectId], composer: nextDraft, updatedAt: Date.now() }
         }
+        scheduleProjectSave(projectId, get)
       }
       scheduleSessionSave(get, state.tabs, state.activeTabId, tabDrafts)
-      return { tabDrafts }
+      return { tabDrafts, projects }
     })
   },
 
@@ -412,17 +452,26 @@ export const useProjectTabStore = create<{
     }
     set((state) => {
       const current = state.tabDrafts[tabId] ?? createEmptyTabComposerState()
+      const nextDraft = normalizeTabComposerState({
+        ...current,
+        activeMode: generation.type,
+        selectedGenerationId: generation.id,
+        [generation.type]: modeDraft
+      })
       const tabDrafts = {
         ...state.tabDrafts,
-        [tabId]: {
-          ...current,
-          activeMode: generation.type,
-          selectedGenerationId: generation.id,
-          [generation.type]: modeDraft
-        }
+        [tabId]: nextDraft
       }
+      const project = state.projects[projectId]
+      const projects = project
+        ? {
+            ...state.projects,
+            [projectId]: { ...project, composer: nextDraft, updatedAt: Date.now() }
+          }
+        : state.projects
+      if (project) scheduleProjectSave(projectId, get)
       scheduleSessionSave(get, state.tabs, state.activeTabId, tabDrafts)
-      return { tabDrafts }
+      return { tabDrafts, projects }
     })
   },
 
