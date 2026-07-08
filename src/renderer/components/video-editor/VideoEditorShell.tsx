@@ -60,6 +60,10 @@ export function VideoEditorShell({
     projectId ? s.projects[projectId] : undefined
   )
   const saveVideoEditorForProject = useProjectTabStore((s) => s.saveVideoEditorForProject)
+  const linkEditorAudioToProject = useProjectTabStore((s) => s.linkEditorAudioToProject)
+  const openExistingProjectTab = useProjectTabStore((s) => s.openExistingProjectTab)
+  const tabs = useProjectTabStore((s) => s.tabs)
+  const setActiveTab = useProjectTabStore((s) => s.setActiveTab)
   const durationMs = useVideoEditorStore((s) => s.durationMs)
   const addAsset = useVideoEditorStore((s) => s.addAsset)
   const addLayer = useVideoEditorStore((s) => s.addLayer)
@@ -346,6 +350,32 @@ export function VideoEditorShell({
     project.layers,
     project.name
   ])
+
+  const useAudioForTiming = useCallback(async (): Promise<void> => {
+    if (!projectId || !selected || selected.asset.type !== 'audio') return
+    if (!window.electronAPI?.importProjectMedia) return
+    try {
+      const imported = await window.electronAPI.importProjectMedia(projectId, selected.asset.path)
+      linkEditorAudioToProject(projectId, {
+        media: {
+          id: selected.asset.id,
+          localPath: imported.localPath,
+          name: imported.name
+        },
+        clipId: selected.clip.id,
+        sourceInMs: selected.clip.sourceInMs,
+        sourceOutMs: selected.clip.sourceOutMs
+      })
+      const existingGenerationTab = tabs.find((t) => t.kind === 'generation' && t.projectId === projectId)
+      if (existingGenerationTab) {
+        setActiveTab(existingGenerationTab.id)
+      } else {
+        await openExistingProjectTab(projectId)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }, [linkEditorAudioToProject, openExistingProjectTab, projectId, selected, setActiveTab, tabs])
 
   useVideoEditorHotkeys({ onExport: openExportPanel })
 
@@ -649,11 +679,21 @@ export function VideoEditorShell({
                 )}
 
                 {selected?.asset.type === 'audio' && (
-                  <VideoAudioSilencePanel
-                    clipId={selected.clip.id}
-                    assetPath={selected.asset.path}
-                    onError={setError}
-                  />
+                  <>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="w-full"
+                      onClick={() => void useAudioForTiming()}
+                    >
+                      Use for video timing
+                    </Button>
+                    <VideoAudioSilencePanel
+                      clipId={selected.clip.id}
+                      assetPath={selected.asset.path}
+                      onError={setError}
+                    />
+                  </>
                 )}
 
                 <div className="text-[10px] text-muted space-y-1">
