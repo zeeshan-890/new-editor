@@ -32,7 +32,8 @@ import { useHiggsfieldStore } from '@renderer/stores/higgsfieldStore'
 import type {
   HiggsfieldGenerationJob,
   ProjectGeneration,
-  ProjectMedia
+  ProjectMedia,
+  ScriptAudioMatch
 } from '@shared/types'
 import {
   activeModeDraft,
@@ -47,6 +48,7 @@ import {
 import { sortImageModels, pickImageModel, imageModelShortLabel } from '@shared/imageModels'
 import {
   attachmentDisplayName,
+  autoVideoDurationFromMatch,
   buildImageGenerationRequest,
   validateImageGenerationInput
 } from '@shared/imageGeneration'
@@ -101,6 +103,7 @@ export function GenerationWorkspace({
   const handleJobUpdate = useProjectTabStore((s) => s.handleJobUpdate)
   const pendingJobProjects = useProjectTabStore((s) => s.pendingJobProjects)
   const openProjectEditorTab = useProjectTabStore((s) => s.openProjectEditorTab)
+  const setScriptMatch = useProjectTabStore((s) => s.setScriptMatch)
 
   const jobs = useHiggsfieldStore((s) => s.jobs)
   const queueStats = useHiggsfieldStore((s) => s.queueStats)
@@ -117,6 +120,7 @@ export function GenerationWorkspace({
   const [error, setError] = useState<string | null>(null)
   const [lightboxItem, setLightboxItem] = useState<ProjectGeneration | null>(null)
   const [dragOverTarget, setDragOverTarget] = useState<'attachments' | 'startFrame' | null>(null)
+  const [matchingScript, setMatchingScript] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const startFrameInputRef = useRef<HTMLInputElement>(null)
 
@@ -376,6 +380,42 @@ export function GenerationWorkspace({
       trackJob(job.id, projectId, built.snapshot)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const handleMatchScriptAudio = async (): Promise<void> => {
+    if (!window.electronAPI?.alignScriptAudio) return
+    if (mode !== 'video') return
+    if (!draft.audioReference?.localPath) {
+      setError('Link an audio clip from the editor first.')
+      return
+    }
+    if (!draft.script.trim()) {
+      setError('Enter script text before matching.')
+      return
+    }
+    setMatchingScript(true)
+    setError(null)
+    try {
+      const match: ScriptAudioMatch = await window.electronAPI.alignScriptAudio({
+        audioPath: draft.audioReference.localPath,
+        script: draft.script,
+        trimStartMs: draft.linkedClipSourceInMs ?? undefined,
+        trimEndMs: draft.linkedClipSourceOutMs ?? undefined
+      })
+      patchDraft({
+        scriptMatch: match,
+        durationSource: 'script-audio-match',
+        videoDuration: autoVideoDurationFromMatch(
+          match.durationMs,
+          draft.autoExtraDurationSeconds
+        )
+      })
+      setScriptMatch(projectId, match)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setMatchingScript(false)
     }
   }
 
@@ -718,6 +758,56 @@ export function GenerationWorkspace({
                   ))}
                 </select>
               </div>
+
+              <div>
+                <Label>Script (timing only)</Label>
+                <textarea
+                  value={draft.script}
+                  onChange={(e) => patchDraft({ script: e.target.value, scriptMatch: null })}
+                  rows={4}
+                  placeholder="Paste narration script used in audio…"
+                  className="w-full mt-1 rounded-md border border-border bg-card px-3 py-2 text-xs resize-none focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div className="rounded border border-border p-2 space-y-2">
+                <div className="text-xs">
+                  <p className="font-medium">Linked audio</p>
+                  {draft.audioReference ? (
+                    <>
+                      <p className="text-muted truncate">{draft.audioReference.name}</p>
+                      {draft.linkedClipSourceInMs !== null && draft.linkedClipSourceOutMs !== null && (
+                        <p className="text-muted">
+                          Clip range: {Math.round(draft.linkedClipSourceInMs)}ms -{' '}
+                          {Math.round(draft.linkedClipSourceOutMs)}ms
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="text-muted">Open the project in Video Editor and click "Use for video timing" on an audio clip.</p>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" className="flex-1" onClick={() => void openProjectEditorTab(projectId)}>
+                    Select in editor
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="flex-1"
+                    disabled={!draft.audioReference || matchingScript}
+                    onClick={() => void handleMatchScriptAudio()}
+                  >
+                    {matchingScript ? 'Matching…' : 'Match script to audio'}
+                  </Button>
+                </div>
+                {draft.scriptMatch && (
+                  <p className="text-[11px] text-muted">
+                    Match: {Math.round(draft.scriptMatch.startMs)}ms - {Math.round(draft.scriptMatch.endMs)}ms
+                    {' '}({(draft.scriptMatch.durationMs / 1000).toFixed(2)}s) · confidence{' '}
+                    {(draft.scriptMatch.confidence * 100).toFixed(1)}%
+                  </p>
+                )}
+              </div>
             </>
           )}
 
@@ -782,7 +872,7 @@ export function GenerationWorkspace({
             <Button size="sm" variant="outline" onClick={() => void openProjectEditorTab(projectId)}>
               <Scissors size={14} className="mr-1" /> Video editor
             </Button>
-            <span className="text-[10px] text-muted hidden sm:inline">Shared gallery · tab composer is isolated</span>
+            <span className="text-[10px] text-muted hidden sm:inline">Shared gallery · composer persists in project</span>
           </div>
         </div>
 
