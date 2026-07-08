@@ -36,12 +36,15 @@ import type {
   ScriptAudioMatch
 } from '@shared/types'
 import {
+  AUTO_EXTRA_DURATION_MIN_AUDIO_SECONDS,
   activeModeDraft,
+  clampAutoExtraDurationSeconds,
   createEmptyTabComposerState,
   DEFAULT_IMAGE_MODEL,
   DEFAULT_VIDEO_MODEL,
   DEFAULT_ASPECT_RATIO,
   IMAGE_ASPECT_RATIOS,
+  MANUAL_VIDEO_DURATION_SECONDS,
   VIDEO_ASPECT_RATIOS,
   generateId
 } from '@shared/types'
@@ -50,6 +53,7 @@ import {
   attachmentDisplayName,
   autoVideoDurationFromMatch,
   buildImageGenerationRequest,
+  resolveVideoDurationSeconds,
   validateImageGenerationInput
 } from '@shared/imageGeneration'
 
@@ -745,18 +749,88 @@ export function GenerationWorkspace({
               </div>
 
               <div>
-                <Label>Duration (seconds)</Label>
-                <select
-                  value={draft.videoDuration}
-                  onChange={(e) => patchDraft({ videoDuration: Number(e.target.value) })}
-                  className="w-full mt-1 h-9 rounded-md border border-border bg-card px-2 text-sm"
-                >
-                  {[3, 4, 5, 6, 8, 10].map((d) => (
-                    <option key={d} value={d}>
-                      {d}s
-                    </option>
-                  ))}
-                </select>
+                <Label>Video duration</Label>
+                <div className="mt-1 mb-2 flex flex-col gap-1.5 text-xs">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name={`duration-source-${tabId}`}
+                      checked={draft.durationSource === 'manual'}
+                      onChange={() => patchDraft({ durationSource: 'manual' })}
+                    />
+                    <span>Manual — pick 3s to 15s</span>
+                  </label>
+                  <label
+                    className={`flex items-center gap-2 ${draft.scriptMatch ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}
+                  >
+                    <input
+                      type="radio"
+                      name={`duration-source-${tabId}`}
+                      checked={draft.durationSource === 'script-audio-match'}
+                      onChange={() => patchDraft({ durationSource: 'script-audio-match' })}
+                      disabled={!draft.scriptMatch}
+                    />
+                    <span>Auto — from script + audio match</span>
+                  </label>
+                </div>
+                {draft.durationSource === 'manual' ? (
+                  <select
+                    value={draft.videoDuration}
+                    onChange={(e) => patchDraft({ videoDuration: Number(e.target.value) })}
+                    className="w-full h-9 rounded-md border border-border bg-card px-2 text-sm"
+                  >
+                    {MANUAL_VIDEO_DURATION_SECONDS.map((d) => (
+                      <option key={d} value={d}>
+                        {d}s
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="rounded-md border border-border bg-card px-3 py-2 text-sm">
+                    {draft.scriptMatch ? (
+                      <div className="space-y-1">
+                        <div>
+                          <span>{resolveVideoDurationSeconds(draft)}s</span>
+                          <span className="text-muted text-xs ml-2">
+                            (matched {(draft.scriptMatch.durationMs / 1000).toFixed(2)}s)
+                          </span>
+                        </div>
+                        <p className="text-muted text-xs">
+                          Extra {clampAutoExtraDurationSeconds(draft.autoExtraDurationSeconds)}s is
+                          {draft.scriptMatch.durationMs / 1000 >= AUTO_EXTRA_DURATION_MIN_AUDIO_SECONDS
+                            ? ' applied'
+                            : ' ignored because matched audio is under 3s'}
+                          .
+                        </p>
+                      </div>
+                    ) : (
+                      <span className="text-muted text-xs">
+                        Match script to audio below to set duration automatically.
+                      </span>
+                    )}
+                  </div>
+                )}
+                <div className="mt-2">
+                  <Label>Auto extra duration (seconds)</Label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={15}
+                    step={1}
+                    value={draft.autoExtraDurationSeconds}
+                    onChange={(e) =>
+                      patchDraft({
+                        autoExtraDurationSeconds: clampAutoExtraDurationSeconds(
+                          Number(e.target.value) || 0
+                        )
+                      })
+                    }
+                    className="w-full mt-1 h-9 rounded-md border border-border bg-card px-2 text-sm"
+                  />
+                  <p className="mt-1 text-[11px] text-muted">
+                    Default is 2s. Added only when matched audio duration is at least 3s.
+                  </p>
+                </div>
               </div>
 
               <div>
