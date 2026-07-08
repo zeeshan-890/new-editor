@@ -110,6 +110,12 @@ export interface ElectronAPI {
     defaultName: string
   }) => Promise<string | null>
   saveVideoEditorProject: (project: VideoEditorProject) => Promise<string | null>
+  alignScriptAudio: (payload: {
+    audioPath: string
+    script: string
+    trimStartMs?: number
+    trimEndMs?: number
+  }) => Promise<import('../shared/types').ScriptAudioMatch>
 }
 
 function subscribe(channel: string, callback: () => void): () => void {
@@ -194,7 +200,8 @@ const api: ElectronAPI = {
   getVideoFilmstrip: (payload) => ipcRenderer.invoke(IPC.VIDEO_FILMSTRIP, payload),
   exportVideoSequence: (payload) => ipcRenderer.invoke(IPC.VIDEO_EXPORT, payload),
   saveMediaAs: (payload) => ipcRenderer.invoke(IPC.MEDIA_SAVE_AS, payload),
-  saveVideoEditorProject: (project) => ipcRenderer.invoke(IPC.VIDEO_EDITOR_PROJECT_SAVE, project)
+  saveVideoEditorProject: (project) => ipcRenderer.invoke(IPC.VIDEO_EDITOR_PROJECT_SAVE, project),
+  alignScriptAudio: (payload) => ipcRenderer.invoke(IPC.ALIGN_SCRIPT_AUDIO, payload)
 }
 
 contextBridge.exposeInMainWorld('electronAPI', api)
