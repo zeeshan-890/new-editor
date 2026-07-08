@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { ProjectTabBar } from './ProjectTabBar'
 import { VideoEditorShell } from '../video-editor/VideoEditorShell'
 import { GenerationWorkspace } from '../workspace/GenerationWorkspace'
+import { ProjectsPage } from '../projects/ProjectsPage'
 import { useProjectTabStore } from '@renderer/stores/projectTabStore'
 
 export function AppShell(): React.JSX.Element {
@@ -9,10 +10,20 @@ export function AppShell(): React.JSX.Element {
   const init = useProjectTabStore((s) => s.init)
   const tabs = useProjectTabStore((s) => s.tabs)
   const activeTabId = useProjectTabStore((s) => s.activeTabId)
+  const projectsPageOpen = useProjectTabStore((s) => s.projectsPageOpen)
+  const flushProjectSaves = useProjectTabStore((s) => s.flushProjectSaves)
 
   useEffect(() => {
     void init()
   }, [init])
+
+  useEffect(() => {
+    const onBeforeUnload = (): void => {
+      void flushProjectSaves()
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [flushProjectSaves])
 
   const activeTab = tabs.find((t) => t.id === activeTabId)
 
@@ -28,7 +39,9 @@ export function AppShell(): React.JSX.Element {
     <div className="h-screen flex flex-col bg-background text-foreground overflow-hidden">
       <ProjectTabBar />
       <div className="flex-1 flex min-h-0">
-        {activeTab?.kind === 'editor' ? (
+        {projectsPageOpen ? (
+          <ProjectsPage />
+        ) : activeTab?.kind === 'editor' ? (
           <VideoEditorShell embedded tabId={activeTab.id} projectId={activeTab.projectId} />
         ) : activeTab?.projectId ? (
           <GenerationWorkspace tabId={activeTab.id} projectId={activeTab.projectId} />
