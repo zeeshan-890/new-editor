@@ -263,6 +263,16 @@ export interface ProjectMedia {
   previewUrl?: string
 }
 
+export interface ScriptAudioMatch {
+  startMs: number
+  endMs: number
+  durationMs: number
+  confidence: number
+  assetId?: string
+  clipId?: string
+  matchedAt: number
+}
+
 export interface ProjectGeneration {
   id: string
   type: GenerationMode
@@ -277,6 +287,14 @@ export interface ProjectGeneration {
   videoStartFrame?: ProjectMedia | null
   videoDuration?: number
   aspectRatio?: string
+  script?: string
+  audioReference?: ProjectMedia | null
+  durationSource?: 'manual' | 'script-audio-match'
+  scriptMatch?: ScriptAudioMatch | null
+  linkedClipId?: string | null
+  linkedClipSourceInMs?: number
+  linkedClipSourceOutMs?: number
+  autoExtraDurationSeconds?: number
 }
 
 /** Composer fields saved per mode within a tab (image vs video stay isolated). */
@@ -289,6 +307,14 @@ export interface GenerationModeDraft {
   videoStartFrame: ProjectMedia | null
   videoDuration: number
   aspectRatio: string
+  script: string
+  audioReference: ProjectMedia | null
+  durationSource: 'manual' | 'script-audio-match'
+  scriptMatch: ScriptAudioMatch | null
+  linkedClipId: string | null
+  linkedClipSourceInMs: number | null
+  linkedClipSourceOutMs: number | null
+  autoExtraDurationSeconds: number
 }
 
 export interface TabComposerState {
@@ -308,6 +334,14 @@ export interface GenerationComposerSnapshot {
   videoStartFrame: ProjectMedia | null
   videoDuration: number
   aspectRatio: string
+  script: string
+  audioReference: ProjectMedia | null
+  durationSource: 'manual' | 'script-audio-match'
+  scriptMatch: ScriptAudioMatch | null
+  linkedClipId: string | null
+  linkedClipSourceInMs: number | null
+  linkedClipSourceOutMs: number | null
+  autoExtraDurationSeconds: number
 }
 
 export interface GenerationProject {
@@ -325,6 +359,7 @@ export interface GenerationProject {
   videoStartFrame: ProjectMedia | null
   videoDuration: number
   generations: ProjectGeneration[]
+  composer: TabComposerState
   /** Timeline state for this project's video editor tab. */
   videoEditor?: VideoEditorProject
   workspaceId?: string
@@ -356,7 +391,7 @@ export interface AppSession {
 }
 
 /** Increment when tab draft migrations are required on load. */
-export const APP_SESSION_VERSION = 3
+export const APP_SESSION_VERSION = 4
 
 export const DEFAULT_IMAGE_MODEL = 'nano_banana_2'
 export const DEFAULT_VIDEO_MODEL = 'kling3_0'
@@ -376,6 +411,30 @@ export const IMAGE_ASPECT_RATIOS = [
 ] as const
 
 export const VIDEO_ASPECT_RATIOS = ['9:16', '16:9', '1:1'] as const
+
+export const VIDEO_DURATION_MIN_SECONDS = 3
+export const VIDEO_DURATION_MAX_SECONDS = 15
+export const AUTO_EXTRA_DURATION_DEFAULT_SECONDS = 2
+export const AUTO_EXTRA_DURATION_MIN_AUDIO_SECONDS = 3
+
+/** Manual Higgsfield video duration choices (seconds). */
+export const MANUAL_VIDEO_DURATION_SECONDS = Array.from(
+  { length: VIDEO_DURATION_MAX_SECONDS - VIDEO_DURATION_MIN_SECONDS + 1 },
+  (_, i) => i + VIDEO_DURATION_MIN_SECONDS
+) as readonly number[]
+
+export function clampVideoDurationSeconds(seconds: number): number {
+  const rounded = Math.round(seconds)
+  return Math.max(
+    VIDEO_DURATION_MIN_SECONDS,
+    Math.min(VIDEO_DURATION_MAX_SECONDS, rounded)
+  )
+}
+
+export function clampAutoExtraDurationSeconds(seconds: number): number {
+  const rounded = Math.round(seconds)
+  return Math.max(0, Math.min(VIDEO_DURATION_MAX_SECONDS, rounded))
+}
 
 export type MediaAssetType = 'video' | 'image' | 'audio'
 
@@ -475,7 +534,15 @@ export function createEmptyModeDraft(mode: GenerationMode): GenerationModeDraft 
     imageAttachments: [],
     videoStartFrame: null,
     videoDuration: 5,
-    aspectRatio: DEFAULT_ASPECT_RATIO
+    aspectRatio: DEFAULT_ASPECT_RATIO,
+    script: '',
+    audioReference: null,
+    durationSource: 'manual',
+    scriptMatch: null,
+    linkedClipId: null,
+    linkedClipSourceInMs: null,
+    linkedClipSourceOutMs: null,
+    autoExtraDurationSeconds: AUTO_EXTRA_DURATION_DEFAULT_SECONDS
   }
 }
 
@@ -506,7 +573,20 @@ export function normalizeTabComposerState(state: TabComposerState | undefined): 
       ...empty.video,
       ...state.video,
       videoStartFrame: state.video?.videoStartFrame ?? null,
-      aspectRatio: state.video?.aspectRatio ?? DEFAULT_ASPECT_RATIO
+      videoDuration: clampVideoDurationSeconds(
+        state.video?.videoDuration ?? empty.video.videoDuration
+      ),
+      aspectRatio: state.video?.aspectRatio ?? DEFAULT_ASPECT_RATIO,
+      audioReference: state.video?.audioReference ?? null,
+      scriptMatch: state.video?.scriptMatch ?? null,
+      durationSource:
+        state.video?.durationSource === 'script-audio-match' ? 'script-audio-match' : 'manual',
+      linkedClipId: state.video?.linkedClipId ?? null,
+      linkedClipSourceInMs: state.video?.linkedClipSourceInMs ?? null,
+      linkedClipSourceOutMs: state.video?.linkedClipSourceOutMs ?? null,
+      autoExtraDurationSeconds: clampAutoExtraDurationSeconds(
+        state.video?.autoExtraDurationSeconds ?? empty.video.autoExtraDurationSeconds
+      )
     },
     image: {
       ...empty.image,
@@ -551,7 +631,8 @@ export function normalizeGenerationProject(project: GenerationProject): Generati
     generations: Array.isArray(project.generations) ? project.generations : [],
     imageAttachments: Array.isArray(project.imageAttachments) ? project.imageAttachments : [],
     videoStartFrame: project.videoStartFrame ?? null,
-    videoDuration: project.videoDuration ?? empty.videoDuration,
+    videoDuration: clampVideoDurationSeconds(project.videoDuration ?? empty.videoDuration),
+    composer: normalizeTabComposerState(project.composer),
     videoEditor: project.videoEditor
       ? normalizeVideoEditorProject(project.videoEditor, project.name)
       : undefined
@@ -576,6 +657,7 @@ export function createEmptyGenerationProject(name?: string): GenerationProject {
     imageAttachments: [],
     videoStartFrame: null,
     videoDuration: 5,
-    generations: []
+    generations: [],
+    composer: createEmptyTabComposerState()
   }
 }
