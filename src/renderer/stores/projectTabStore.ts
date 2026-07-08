@@ -78,6 +78,7 @@ export const useProjectTabStore = create<{
   projects: Record<string, GenerationProject>
   tabDrafts: Record<string, TabComposerState>
   projectList: ProjectSummary[]
+  projectsPageOpen: boolean
   newTabMenuOpen: boolean
   pendingJobProjects: Record<string, string>
   pendingJobConfigs: Record<string, GenerationComposerSnapshot>
@@ -86,6 +87,7 @@ export const useProjectTabStore = create<{
 
   init: () => Promise<void>
   setNewTabMenuOpen: (open: boolean) => void
+  openProjectsPage: () => void
   setActiveTab: (tabId: string) => void
   closeTab: (tabId: string) => void
   openNewProjectTab: () => Promise<void>
@@ -99,6 +101,8 @@ export const useProjectTabStore = create<{
   ) => void
   saveVideoEditorForProject: (projectId: string) => void
   refreshProjectList: () => Promise<void>
+  flushProjectSaves: () => Promise<void>
+  deleteProjectAndCloseTabs: (projectId: string) => Promise<boolean>
   updateProject: (projectId: string, patch: Partial<GenerationProject>) => void
   updateTabDraft: (tabId: string, patch: Partial<TabComposerState>) => void
   updateModeDraft: (tabId: string, mode: GenerationMode, patch: Partial<GenerationModeDraft>) => void
@@ -122,6 +126,7 @@ export const useProjectTabStore = create<{
   projects: {},
   tabDrafts: {},
   projectList: [],
+  projectsPageOpen: false,
   newTabMenuOpen: false,
   pendingJobProjects: {},
   pendingJobConfigs: {},
@@ -155,6 +160,7 @@ export const useProjectTabStore = create<{
 
       const sessionVersion = session?.sessionVersion ?? 0
       const needsModelMigration = sessionVersion < APP_SESSION_VERSION
+      const needsComposerMigration = sessionVersion < 4
 
       for (const [draftTabId, draft] of Object.entries(tabDrafts)) {
         const imageDraft = draft?.image
@@ -171,6 +177,20 @@ export const useProjectTabStore = create<{
         }
       }
 
+      for (const tab of tabs) {
+        if (tab.kind !== 'generation' || !tab.projectId) continue
+        const project = projects[tab.projectId]
+        if (!project) continue
+        const draftFromSession = tabDrafts[tab.id]
+        const composer = needsComposerMigration && draftFromSession
+          ? normalizeTabComposerState(draftFromSession)
+          : normalizeTabComposerState(project.composer ?? draftFromSession ?? createEmptyTabComposerState())
+        tabDrafts[tab.id] = composer
+        if (needsComposerMigration) {
+          projects[tab.projectId] = { ...project, composer }
+        }
+      }
+
       if (tabs.length === 0) {
         const project = await window.electronAPI.createProject()
         const tab: AppTab = {
@@ -181,8 +201,8 @@ export const useProjectTabStore = create<{
         }
         tabs = [tab]
         activeTabId = tab.id
-        projects[project.id] = project
-        tabDrafts[tab.id] = createEmptyTabComposerState()
+        projects[project.id] = normalizeGenerationProject(project)
+        tabDrafts[tab.id] = normalizeTabComposerState(projects[project.id].composer)
       }
 
       const nextSessionVersion = needsModelMigration ? APP_SESSION_VERSION : sessionVersion
@@ -199,6 +219,11 @@ export const useProjectTabStore = create<{
         initialized: true,
         sessionVersion: nextSessionVersion
       })
+      if (needsComposerMigration && window.electronAPI?.saveProject) {
+        for (const project of Object.values(projects)) {
+          void window.electronAPI.saveProject(project)
+        }
+      }
       scheduleSessionSave(get, tabs, activeTabId, tabDrafts, nextSessionVersion)
     } catch (err) {
       console.error('[projectTabStore:init]', err)
@@ -208,8 +233,10 @@ export const useProjectTabStore = create<{
 
   setNewTabMenuOpen: (newTabMenuOpen) => set({ newTabMenuOpen }),
 
+  openProjectsPage: () => set({ projectsPageOpen: true, newTabMenuOpen: false }),
+
   setActiveTab: (tabId) => {
-    set({ activeTabId: tabId })
+    set({ activeTabId: tabId, projectsPageOpen: false })
     scheduleSessionSave(get, get().tabs, tabId, get().tabDrafts)
   },
 
@@ -242,7 +269,8 @@ export const useProjectTabStore = create<{
       activeTabId: tab.id,
       projects: { ...state.projects, [project.id]: project },
       tabDrafts,
-      newTabMenuOpen: false
+      newTabMenuOpen: false,
+      projectsPageOpen: false
     }))
     scheduleSessionSave(get, get().tabs, tab.id, tabDrafts)
     await get().refreshProjectList()
@@ -270,7 +298,8 @@ export const useProjectTabStore = create<{
       activeTabId: tab.id,
       projects: { ...state.projects, [project.id]: project },
       tabDrafts,
-      newTabMenuOpen: false
+      newTabMenuOpen: false,
+      projectsPageOpen: false
     }))
     scheduleSessionSave(get, get().tabs, tab.id, tabDrafts)
   },
@@ -298,6 +327,7 @@ export const useProjectTabStore = create<{
       tabs: [...state.tabs, tab],
       activeTabId: tab.id,
       newTabMenuOpen: false,
+      projectsPageOpen: false,
       projects: project
         ? { ...state.projects, [project.id]: normalizeGenerationProject(project) }
         : state.projects
@@ -308,7 +338,7 @@ export const useProjectTabStore = create<{
   openProjectEditorTab: async (projectId) => {
     const existing = get().tabs.find((t) => t.kind === 'editor' && t.projectId === projectId)
     if (existing) {
-      set({ activeTabId: existing.id, newTabMenuOpen: false })
+      set({ activeTabId: existing.id, newTabMenuOpen: false, projectsPageOpen: false })
       scheduleSessionSave(get, get().tabs, existing.id, get().tabDrafts)
       return
     }
@@ -342,6 +372,62 @@ export const useProjectTabStore = create<{
     if (!window.electronAPI?.listProjects) return
     const projectList = await window.electronAPI.listProjects()
     set({ projectList })
+  },
+
+  flushProjectSaves: async () => {
+    if (!window.electronAPI?.saveProject) return
+    const pending = [...saveTimers.keys()]
+    for (const projectId of pending) {
+      const timer = saveTimers.get(projectId)
+      if (timer) clearTimeout(timer)
+      saveTimers.delete(projectId)
+      const project = get().projects[projectId]
+      if (project) {
+        await window.electronAPI.saveProject(project)
+      }
+    }
+  },
+
+  deleteProjectAndCloseTabs: async (projectId) => {
+    if (!window.electronAPI?.deleteProject || !window.electronAPI.createProject) return false
+    const ok = await window.electronAPI.deleteProject(projectId)
+    if (!ok) return false
+    let needsFallbackProject = false
+    set((state) => {
+      let tabs = state.tabs.filter((tab) => tab.projectId !== projectId)
+      const tabDrafts = { ...state.tabDrafts }
+      for (const tab of state.tabs) {
+        if (tab.projectId === projectId) delete tabDrafts[tab.id]
+      }
+      const projects = { ...state.projects }
+      delete projects[projectId]
+      if (tabs.length === 0) {
+        needsFallbackProject = true
+      }
+      const activeTabId = tabs.some((t) => t.id === state.activeTabId)
+        ? state.activeTabId
+        : tabs[0]?.id ?? ''
+      return { tabs, tabDrafts, projects, activeTabId }
+    })
+    if (needsFallbackProject) {
+      const fallback = normalizeGenerationProject(await window.electronAPI.createProject())
+      const fallbackTab: AppTab = {
+        id: generateId(),
+        kind: 'generation',
+        title: fallback.name,
+        projectId: fallback.id
+      }
+      set((state) => ({
+        tabs: [fallbackTab],
+        activeTabId: fallbackTab.id,
+        projects: { ...state.projects, [fallback.id]: fallback },
+        tabDrafts: { ...state.tabDrafts, [fallbackTab.id]: normalizeTabComposerState(fallback.composer) },
+        projectsPageOpen: false
+      }))
+    }
+    scheduleSessionSave(get, get().tabs, get().activeTabId, get().tabDrafts)
+    await get().refreshProjectList()
+    return true
   },
 
   updateProject: (projectId, patch) => {
