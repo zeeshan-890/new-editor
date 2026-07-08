@@ -68,6 +68,7 @@ import {
   saveSession
 } from '../projects/store'
 import { hydrateGenerationDraft, ensureGenerationMediaInProject } from '../projects/media'
+import { alignScriptAudio } from '../alignment/whisper'
 
 let currentPcmPath: string | null = null
 let currentMetadata: LoadedAudioProject['metadata'] | null = null
@@ -187,6 +188,14 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     IPC.PROJECT_ENSURE_GENERATION_MEDIA,
     async (_e, projectId: string, generation: import('../../shared/types').ProjectGeneration) =>
       ensureGenerationMediaInProject(projectId, generation)
+  )
+
+  ipcMain.handle(
+    IPC.ALIGN_SCRIPT_AUDIO,
+    async (
+      _e,
+      payload: { audioPath: string; script: string; trimStartMs?: number; trimEndMs?: number }
+    ) => alignScriptAudio(payload.audioPath, payload.script, payload.trimStartMs, payload.trimEndMs)
   )
 
   ipcMain.handle(IPC.SESSION_LOAD, async () => loadSession())
