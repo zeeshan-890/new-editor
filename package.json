@@ -75,6 +75,11 @@
         "from": "resources/models/",
         "to": "models",
         "filter": ["**/*"]
+      },
+      {
+        "from": "resources/whisper/",
+        "to": "whisper",
+        "filter": ["**/*"]
       }
     ],
     "asarUnpack": [
