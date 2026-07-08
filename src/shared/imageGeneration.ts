@@ -8,7 +8,14 @@ import type {
   ProjectMedia,
   TabComposerState
 } from './types'
-import { activeModeDraft, DEFAULT_ASPECT_RATIO } from './types'
+import {
+  AUTO_EXTRA_DURATION_DEFAULT_SECONDS,
+  AUTO_EXTRA_DURATION_MIN_AUDIO_SECONDS,
+  activeModeDraft,
+  clampAutoExtraDurationSeconds,
+  clampVideoDurationSeconds,
+  DEFAULT_ASPECT_RATIO
+} from './types'
 
 export function buildEffectivePrompt(
   prompt: string,
@@ -63,8 +70,40 @@ export function buildComposerSnapshot(
     imageAttachments: cloneProjectMediaList(draft.imageAttachments),
     videoStartFrame: draft.videoStartFrame ? cloneProjectMedia(draft.videoStartFrame) : null,
     videoDuration: draft.videoDuration,
-    aspectRatio: draft.aspectRatio
+    aspectRatio: draft.aspectRatio,
+    script: draft.script,
+    audioReference: draft.audioReference ? cloneProjectMedia(draft.audioReference) : null,
+    durationSource: draft.durationSource,
+    scriptMatch: draft.scriptMatch ? { ...draft.scriptMatch } : null,
+    linkedClipId: draft.linkedClipId,
+    linkedClipSourceInMs: draft.linkedClipSourceInMs,
+    linkedClipSourceOutMs: draft.linkedClipSourceOutMs,
+    autoExtraDurationSeconds: draft.autoExtraDurationSeconds
   }
+}
+
+export function resolveVideoDurationSeconds(draft: GenerationModeDraft): number {
+  if (draft.durationSource === 'script-audio-match' && draft.scriptMatch) {
+    const baseSeconds = draft.scriptMatch.durationMs / 1000
+    const shouldAddExtra = baseSeconds >= AUTO_EXTRA_DURATION_MIN_AUDIO_SECONDS
+    const seconds = shouldAddExtra
+      ? baseSeconds + clampAutoExtraDurationSeconds(draft.autoExtraDurationSeconds)
+      : baseSeconds
+    return clampVideoDurationSeconds(Math.ceil(seconds))
+  }
+  return clampVideoDurationSeconds(draft.videoDuration)
+}
+
+export function autoVideoDurationFromMatch(
+  durationMs: number,
+  autoExtraDurationSeconds: number
+): number {
+  const baseSeconds = durationMs / 1000
+  const shouldAddExtra = baseSeconds >= AUTO_EXTRA_DURATION_MIN_AUDIO_SECONDS
+  const total = shouldAddExtra
+    ? baseSeconds + clampAutoExtraDurationSeconds(autoExtraDurationSeconds)
+    : baseSeconds
+  return clampVideoDurationSeconds(Math.ceil(total))
 }
 
 export interface ImageGenerationBuildInput {
@@ -101,7 +140,7 @@ export function buildImageGenerationRequest(
     projectId: input.projectId,
     params: {
       aspect_ratio: draft.aspectRatio,
-      ...(mode === 'video' ? { duration: String(draft.videoDuration) } : {})
+      ...(mode === 'video' ? { duration: String(resolveVideoDurationSeconds(draft)) } : {})
     },
     mediaPath: mode === 'video' ? draft.videoStartFrame?.localPath : undefined,
     mediaFlag: mode === 'video' && draft.videoStartFrame ? 'start-image' : undefined,
@@ -150,6 +189,16 @@ export function generationToModeDraft(generation: ProjectGeneration): Generation
       : [],
     videoStartFrame: generation.videoStartFrame ? cloneProjectMedia(generation.videoStartFrame) : null,
     videoDuration: generation.videoDuration ?? 5,
-    aspectRatio: generation.aspectRatio ?? DEFAULT_ASPECT_RATIO
+    aspectRatio: generation.aspectRatio ?? DEFAULT_ASPECT_RATIO,
+    script: generation.script ?? '',
+    audioReference: generation.audioReference ? cloneProjectMedia(generation.audioReference) : null,
+    durationSource:
+      generation.durationSource === 'script-audio-match' ? 'script-audio-match' : 'manual',
+    scriptMatch: generation.scriptMatch ? { ...generation.scriptMatch } : null,
+    linkedClipId: generation.linkedClipId ?? null,
+    linkedClipSourceInMs: generation.linkedClipSourceInMs ?? null,
+    linkedClipSourceOutMs: generation.linkedClipSourceOutMs ?? null,
+    autoExtraDurationSeconds:
+      generation.autoExtraDurationSeconds ?? AUTO_EXTRA_DURATION_DEFAULT_SECONDS
   }
 }
