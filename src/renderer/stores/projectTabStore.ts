@@ -8,6 +8,7 @@ import type {
   ProjectGeneration,
   ProjectMedia,
   ProjectSummary,
+  ScriptAudioMatch,
   TabComposerState
 } from '@shared/types'
 import {
@@ -16,6 +17,7 @@ import {
   DEFAULT_IMAGE_MODEL,
   generateId,
   generationToModeDraft,
+  clampVideoDurationSeconds,
   normalizeGenerationProject,
   normalizeTabComposerState
 } from '@shared/types'
@@ -110,6 +112,16 @@ export const useProjectTabStore = create<{
   setTabMode: (tabId: string, mode: GenerationMode) => void
   loadGenerationIntoTab: (tabId: string, projectId: string, generation: ProjectGeneration) => Promise<void>
   addProjectGeneration: (projectId: string, generation: ProjectGeneration) => void
+  linkEditorAudioToProject: (
+    projectId: string,
+    payload: {
+      media: ProjectMedia
+      clipId: string
+      sourceInMs: number
+      sourceOutMs: number
+    }
+  ) => void
+  setScriptMatch: (projectId: string, match: ScriptAudioMatch | null) => void
   trackJob: (jobId: string, projectId: string, config: GenerationComposerSnapshot) => void
   handleJobUpdate: (job: {
     id: string
@@ -576,6 +588,66 @@ export const useProjectTabStore = create<{
     void get().refreshProjectList()
   },
 
+  linkEditorAudioToProject: (projectId, payload) => {
+    set((state) => {
+      const project = state.projects[projectId]
+      if (!project) return state
+      const nextComposer = normalizeTabComposerState({
+        ...project.composer,
+        activeMode: 'video',
+        video: {
+          ...project.composer.video,
+          audioReference: { ...payload.media },
+          linkedClipId: payload.clipId,
+          linkedClipSourceInMs: payload.sourceInMs,
+          linkedClipSourceOutMs: payload.sourceOutMs,
+          scriptMatch: null,
+          durationSource: 'manual',
+          videoDuration: clampVideoDurationSeconds(
+            Math.ceil((payload.sourceOutMs - payload.sourceInMs) / 1000)
+          )
+        }
+      })
+      const nextProject = { ...project, composer: nextComposer, updatedAt: Date.now() }
+      const projects = { ...state.projects, [projectId]: nextProject }
+      const tabDrafts = { ...state.tabDrafts }
+      for (const tab of state.tabs) {
+        if (tab.kind === 'generation' && tab.projectId === projectId) {
+          tabDrafts[tab.id] = nextComposer
+        }
+      }
+      scheduleProjectSave(projectId, get)
+      scheduleSessionSave(get, state.tabs, state.activeTabId, tabDrafts)
+      return { projects, tabDrafts }
+    })
+  },
+
+  setScriptMatch: (projectId, match) => {
+    set((state) => {
+      const project = state.projects[projectId]
+      if (!project) return state
+      const nextComposer = normalizeTabComposerState({
+        ...project.composer,
+        video: {
+          ...project.composer.video,
+          scriptMatch: match,
+          durationSource: match ? 'script-audio-match' : project.composer.video.durationSource
+        }
+      })
+      const nextProject = { ...project, composer: nextComposer, updatedAt: Date.now() }
+      const projects = { ...state.projects, [projectId]: nextProject }
+      const tabDrafts = { ...state.tabDrafts }
+      for (const tab of state.tabs) {
+        if (tab.kind === 'generation' && tab.projectId === projectId) {
+          tabDrafts[tab.id] = nextComposer
+        }
+      }
+      scheduleProjectSave(projectId, get)
+      scheduleSessionSave(get, state.tabs, state.activeTabId, tabDrafts)
+      return { projects, tabDrafts }
+    })
+  },
+
   trackJob: (jobId, projectId, config) => {
     set((state) => ({
       pendingJobProjects: { ...state.pendingJobProjects, [jobId]: projectId },
@@ -605,7 +677,15 @@ export const useProjectTabStore = create<{
           : undefined,
         videoStartFrame: config?.videoStartFrame ? { ...config.videoStartFrame } : undefined,
         videoDuration: config?.videoDuration,
-        aspectRatio: config?.aspectRatio
+        aspectRatio: config?.aspectRatio,
+        script: config?.script,
+        audioReference: config?.audioReference ? { ...config.audioReference } : undefined,
+        durationSource: config?.durationSource,
+        scriptMatch: config?.scriptMatch ? { ...config.scriptMatch } : undefined,
+        linkedClipId: config?.linkedClipId,
+        linkedClipSourceInMs: config?.linkedClipSourceInMs ?? undefined,
+        linkedClipSourceOutMs: config?.linkedClipSourceOutMs ?? undefined,
+        autoExtraDurationSeconds: config?.autoExtraDurationSeconds
       }
       get().addProjectGeneration(projectId, generation)
       if (window.electronAPI?.ensureGenerationMedia) {
