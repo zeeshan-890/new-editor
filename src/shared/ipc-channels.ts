@@ -43,6 +43,7 @@ export const IPC = {
   PROJECT_IMPORT_MEDIA_URL: 'project:import-media-url',
   PROJECT_ENSURE_GENERATION_MEDIA: 'project:ensure-generation-media',
   PROJECT_HYDRATE_DRAFT: 'project:hydrate-draft',
+  ALIGN_SCRIPT_AUDIO: 'alignment:script-audio',
   SESSION_LOAD: 'session:load',
   SESSION_SAVE: 'session:save',
   OPEN_VIDEO_FILE: 'dialog:open-video',
