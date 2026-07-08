@@ -43,7 +43,7 @@ export async function listProjectSummaries(): Promise<ProjectSummary[]> {
         name: project.name,
         updatedAt: project.updatedAt,
         generationCount: project.generations?.length ?? 0,
-        mode: project.mode ?? 'image'
+        mode: project.composer?.activeMode ?? project.mode ?? 'image'
       })
     } catch {
       // skip invalid project folders
