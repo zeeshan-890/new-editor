@@ -1,4 +1,4 @@
-import { Plus, X, Scissors, FolderOpen, Sparkles } from 'lucide-react'
+import { Plus, X, Scissors, FolderOpen, Sparkles, Library } from 'lucide-react'
 import { cn } from '@renderer/lib/utils'
 import { useProjectTabStore } from '@renderer/stores/projectTabStore'
 import type { AppTabKind } from '@shared/types'
@@ -20,6 +20,7 @@ export function ProjectTabBar(): React.JSX.Element {
   const openExistingProjectTab = useProjectTabStore((s) => s.openExistingProjectTab)
   const openEditorTab = useProjectTabStore((s) => s.openEditorTab)
   const openProjectEditorTab = useProjectTabStore((s) => s.openProjectEditorTab)
+  const openProjectsPage = useProjectTabStore((s) => s.openProjectsPage)
 
   return (
     <div className="relative flex items-end gap-0.5 px-2 pt-2 pb-0 bg-card border-b border-border shrink-0 min-h-[40px]">
@@ -51,6 +52,16 @@ export function ProjectTabBar(): React.JSX.Element {
           )}
         </div>
       ))}
+
+      <button
+        type="button"
+        className="flex items-center justify-center w-8 h-8 rounded-md text-muted hover:text-foreground hover:bg-background/60 mb-0.5"
+        onClick={openProjectsPage}
+        aria-label="Projects"
+        title="Projects"
+      >
+        <Library size={16} />
+      </button>
 
       <button
         type="button"
