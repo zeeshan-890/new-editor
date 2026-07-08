@@ -126,6 +126,9 @@ export async function hydrateGenerationDraft(
   if (generation.type === 'video' && draft.videoStartFrame) {
     draft.videoStartFrame = await ensureAttachmentInProject(projectId, draft.videoStartFrame)
   }
+  if (generation.type === 'video' && draft.audioReference) {
+    draft.audioReference = await ensureAttachmentInProject(projectId, draft.audioReference)
+  }
 
   return draft
 }
