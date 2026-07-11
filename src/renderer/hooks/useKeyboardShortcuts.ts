@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { useHotkeys } from 'react-hotkeys-hook'
 import { useEditorStore } from '../stores/editorStore'
+import { usePlayheadStore } from '../stores/playheadStore'
 import { usePlaybackStore } from '../stores/playbackStore'
 import { AudioPlayer } from '../lib/audio/player'
 
@@ -17,9 +18,9 @@ export function useKeyboardShortcuts(
   const undo = useEditorStore((s) => s.undo)
   const redo = useEditorStore((s) => s.redo)
 
-  const playheadMs = usePlaybackStore((s) => s.playheadMs)
-  const setPlayheadMs = usePlaybackStore((s) => s.setPlayheadMs)
-  const setIsPlaying = usePlaybackStore((s) => s.setIsPlaying)
+  const playheadMs = usePlayheadStore((s) => s.playheadMs)
+  const setPlayheadMs = usePlayheadStore((s) => s.setPlayheadMs)
+  const setIsPlaying = usePlayheadStore((s) => s.setIsPlaying)
   const loopSelection = usePlaybackStore((s) => s.loopSelection)
   const setLoopSelection = usePlaybackStore((s) => s.setLoopSelection)
   const zoomIn = usePlaybackStore((s) => s.zoomIn)
@@ -133,8 +134,8 @@ export function useKeyboardShortcuts(
 
 export function useAudioPlayer(): React.RefObject<AudioPlayer | null> {
   const playerRef = useRef<AudioPlayer | null>(null)
-  const setPlayheadMs = usePlaybackStore((s) => s.setPlayheadMs)
-  const setIsPlaying = usePlaybackStore((s) => s.setIsPlaying)
+  const setPlayheadMs = usePlayheadStore((s) => s.setPlayheadMs)
+  const setIsPlaying = usePlayheadStore((s) => s.setIsPlaying)
 
   useEffect(() => {
     const player = new AudioPlayer()
