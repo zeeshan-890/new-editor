@@ -17,8 +17,9 @@ import { Dialog, DialogRow } from '../common/Dialog'
 import { VideoTimeline, localMediaUrl } from './VideoTimeline'
 import { VideoAudioSilencePanel } from './VideoAudioSilencePanel'
 import { VideoInspectorTabs, type VideoInspectorTab } from './VideoInspectorTabs'
-import { VideoExportPanel } from './VideoExportPanel'
+import { VideoExportPanel, type TimelineExportMode } from './VideoExportPanel'
 import { useVideoEditorStore } from '@renderer/stores/videoEditorStore'
+import { usePlayheadStore } from '@renderer/stores/playheadStore'
 import { usePlaybackStore } from '@renderer/stores/playbackStore'
 import { useVideoEditorHotkeys } from '@renderer/hooks/useVideoEditorHotkeys'
 import { useVideoEditorPlayback } from '@renderer/hooks/useVideoEditorPlayback'
@@ -26,9 +27,11 @@ import { clipDurationMs } from '@shared/types'
 import { formatTime } from '@renderer/lib/utils'
 import {
   DEFAULT_VIDEO_EXPORT_OPTIONS,
+  TIMELINE_AUDIO_EXPORT_FORMATS,
   VIDEO_EXPORT_PRESETS,
   VIDEO_EXPORT_QUALITY,
-  suggestExportPreset
+  suggestExportPreset,
+  type TimelineAudioExportFormat
 } from '@shared/videoExport'
 import {
   allowFileDrop,
@@ -86,19 +89,29 @@ export function VideoEditorShell({
     }
     return null
   }, [selectedClipId, project.layers, project.assets])
+
+  const sidebarLibraryAssets = useMemo(() => {
+    const onTimeline = new Set(
+      project.layers.flatMap((layer) => layer.clips.map((clip) => clip.assetId))
+    )
+    return project.assets.filter((asset) => !onTimeline.has(asset.id))
+  }, [project.assets, project.layers])
+
   const visualClipAtPlayhead = useVideoEditorStore((s) => s.visualClipAtPlayhead)
   const audioClipAtPlayhead = useVideoEditorStore((s) => s.audioClipAtPlayhead)
 
-  const playheadMs = usePlaybackStore((s) => s.playheadMs)
-  const isPlaying = usePlaybackStore((s) => s.isPlaying)
-  const setPlayheadMs = usePlaybackStore((s) => s.setPlayheadMs)
-  const setIsPlaying = usePlaybackStore((s) => s.setIsPlaying)
+  const playheadMs = usePlayheadStore((s) => s.playheadMs)
+  const isPlaying = usePlayheadStore((s) => s.isPlaying)
+  const setPlayheadMs = usePlayheadStore((s) => s.setPlayheadMs)
+  const setIsPlaying = usePlayheadStore((s) => s.setIsPlaying)
   const zoomIn = usePlaybackStore((s) => s.zoomIn)
   const zoomOut = usePlaybackStore((s) => s.zoomOut)
   const fitTimelineView = usePlaybackStore((s) => s.fitTimelineView)
   const setScrollMs = usePlaybackStore((s) => s.setScrollMs)
   const scrollMs = usePlaybackStore((s) => s.scrollMs)
   const zoom = usePlaybackStore((s) => s.zoom)
+  const timelineTool = usePlaybackStore((s) => s.timelineTool)
+  const setTimelineTool = usePlaybackStore((s) => s.setTimelineTool)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
@@ -111,6 +124,8 @@ export function VideoEditorShell({
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [inspectorTab, setInspectorTab] = useState<VideoInspectorTab>('inspector')
   const [exporting, setExporting] = useState(false)
+  const [exportMode, setExportMode] = useState<TimelineExportMode>('video')
+  const [audioExportFormat, setAudioExportFormat] = useState<TimelineAudioExportFormat>('wav')
   const [exportPresetId, setExportPresetId] = useState('1080p-vertical')
   const [exportQualityId, setExportQualityId] = useState<(typeof VIDEO_EXPORT_QUALITY)[number]['id']>('medium')
   const [includeVideoLayerAudio, setIncludeVideoLayerAudio] = useState(true)
@@ -311,19 +326,45 @@ export function VideoEditorShell({
   }, [project.assets, project.layers])
 
   const runExport = useCallback(async (): Promise<void> => {
-    const preset = VIDEO_EXPORT_PRESETS.find((p) => p.id === exportPresetId) ?? VIDEO_EXPORT_PRESETS[0]
-    const quality =
-      VIDEO_EXPORT_QUALITY.find((q) => q.id === exportQualityId) ?? VIDEO_EXPORT_QUALITY[1]
-
-    const defaultName = `${project.name || 'export'}.mp4`.replace(/[<>:"/\\|?*]/g, '_')
-    const outputPath = await window.electronAPI?.saveVideoFile(defaultName)
-    if (!outputPath || !window.electronAPI?.exportVideoSequence) return
+    if (!window.electronAPI?.exportVideoSequence) return
 
     setExporting(true)
     setError(null)
     setExportSuccess(null)
 
     try {
+      if (exportMode === 'audio') {
+        const formatMeta =
+          TIMELINE_AUDIO_EXPORT_FORMATS.find((f) => f.id === audioExportFormat) ??
+          TIMELINE_AUDIO_EXPORT_FORMATS[0]
+        const baseName = `${project.name || 'export'}.${formatMeta.extension}`.replace(
+          /[<>:"/\\|?*]/g,
+          '_'
+        )
+        const outputPath = await window.electronAPI.saveFile(baseName)
+        if (!outputPath) return
+
+        const result = await window.electronAPI.exportVideoSequence({
+          mode: 'timeline-audio',
+          assets: project.assets,
+          layers: project.layers,
+          outputPath
+        })
+        if (!('durationMs' in result)) {
+          throw new Error('Audio export failed.')
+        }
+        setExportSuccess(`Exported ${formatTime(result.durationMs, false)} → ${result.outputPath}`)
+        return
+      }
+
+      const preset = VIDEO_EXPORT_PRESETS.find((p) => p.id === exportPresetId) ?? VIDEO_EXPORT_PRESETS[0]
+      const quality =
+        VIDEO_EXPORT_QUALITY.find((q) => q.id === exportQualityId) ?? VIDEO_EXPORT_QUALITY[1]
+
+      const defaultName = `${project.name || 'export'}.mp4`.replace(/[<>:"/\\|?*]/g, '_')
+      const outputPath = await window.electronAPI.saveVideoFile(defaultName)
+      if (!outputPath) return
+
       const result = await window.electronAPI.exportVideoSequence({
         assets: project.assets,
         layers: project.layers,
@@ -336,13 +377,18 @@ export function VideoEditorShell({
           includeVideoLayerAudio
         }
       })
-      setExportSuccess(`Exported ${formatTime(result.durationMs, false)} → ${outputPath}`)
+      if (!('durationMs' in result)) {
+        throw new Error('Video export failed.')
+      }
+      setExportSuccess(`Exported ${formatTime(result.durationMs, false)} → ${result.outputPath}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setExporting(false)
     }
   }, [
+    exportMode,
+    audioExportFormat,
     exportPresetId,
     exportQualityId,
     includeVideoLayerAudio,
@@ -483,12 +529,12 @@ export function VideoEditorShell({
                 <div className="border-t border-border pt-2" />
               </div>
             )}
-            {project.assets.length === 0 && !generationProject?.generations.length && (
+            {sidebarLibraryAssets.length === 0 && !generationProject?.generations.length && (
               <p className="text-[10px] text-muted px-1">
                 Import or drop clips — they are added to the timeline automatically.
               </p>
             )}
-            {project.assets.map((asset) => (
+            {sidebarLibraryAssets.map((asset) => (
               <div
                 key={asset.id}
                 className="rounded border border-border bg-background p-2 space-y-2"
@@ -561,6 +607,24 @@ export function VideoEditorShell({
             <span className="text-xs text-muted tabular-nums">
               {formatTime(playheadMs)} / {formatTime(durationMs)}
             </span>
+            <div className="flex items-center gap-1 ml-2">
+              <Button
+                size="sm"
+                variant={timelineTool === 'select' ? 'default' : 'outline'}
+                title="Select tool (A)"
+                onClick={() => setTimelineTool('select')}
+              >
+                A
+              </Button>
+              <Button
+                size="sm"
+                variant={timelineTool === 'split' ? 'default' : 'outline'}
+                title="Split tool (B)"
+                onClick={() => setTimelineTool('split')}
+              >
+                B
+              </Button>
+            </div>
             <div className="flex-1" />
             <Button size="sm" variant="outline" onClick={fitTimelineView} title="Fit timeline to content">
               Fit
@@ -593,11 +657,15 @@ export function VideoEditorShell({
             {inspectorTab === 'export' ? (
               <VideoExportPanel
                 layers={project.layers}
+                exportMode={exportMode}
+                audioFormat={audioExportFormat}
                 exportPresetId={exportPresetId}
                 exportQualityId={exportQualityId}
                 includeVideoLayerAudio={includeVideoLayerAudio}
                 exporting={exporting}
                 exportSuccess={exportSuccess}
+                onExportModeChange={setExportMode}
+                onAudioFormatChange={setAudioExportFormat}
                 onPresetChange={setExportPresetId}
                 onQualityChange={setExportQualityId}
                 onIncludeVideoLayerAudioChange={setIncludeVideoLayerAudio}
