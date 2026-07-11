@@ -29,6 +29,10 @@ import type {
   VideoFilmstrip,
   WaveformPeaks
 } from '../shared/types'
+import type {
+  LlmSettings,
+  SegmentPipelineState
+} from '../shared/segmentPipeline'
 
 export interface ElectronAPI {
   openFile: () => Promise<string | null>
@@ -99,11 +103,18 @@ export interface ElectronAPI {
     type: MediaAsset['type']
   }) => Promise<VideoFilmstrip>
   exportVideoSequence: (payload: {
+    mode?: 'sync-pipeline-timeline-audio' | 'timeline-audio'
+    projectId?: string
+    videoEditor?: VideoEditorProject
+    pipeline?: SegmentPipelineState
     assets: MediaAsset[]
     layers: TimelineLayer[]
     outputPath: string
     options?: import('../shared/videoExport').VideoExportOptions
-  }) => Promise<{ outputPath: string; durationMs: number }>
+  }) => Promise<
+    | { outputPath: string; durationMs: number }
+    | { project: GenerationProject }
+  >
   saveMediaAs: (payload: {
     url?: string
     localPath?: string
@@ -116,6 +127,62 @@ export interface ElectronAPI {
     trimStartMs?: number
     trimEndMs?: number
   }) => Promise<import('../shared/types').ScriptAudioMatch>
+  getLlmSettings: () => Promise<LlmSettings>
+  saveLlmSettings: (settings: LlmSettings) => Promise<LlmSettings>
+  analyzeScript: (
+    input: string | import('../shared/segmentPipeline').AnalyzeScriptInput
+  ) => Promise<import('../shared/segmentPipeline').LlmAnalyzeResult>
+  applyPipelineAnalysis: (
+    projectId: string,
+    script: string,
+    pipeline?: SegmentPipelineState
+  ) => Promise<GenerationProject>
+  updateProjectPipeline: (projectId: string, pipeline: SegmentPipelineState) => Promise<GenerationProject>
+  syncPipelineTimelineAudio: (
+    projectId: string,
+    videoEditor?: VideoEditorProject,
+    pipeline?: SegmentPipelineState
+  ) => Promise<GenerationProject>
+  matchPipelineSegmentTimings: (
+    projectId: string,
+    pipeline?: SegmentPipelineState
+  ) => Promise<GenerationProject>
+  startPipeline: (
+    projectId: string,
+    videoEditor?: VideoEditorProject,
+    pipeline?: SegmentPipelineState
+  ) => Promise<SegmentPipelineState>
+  startPipelineImages: (
+    projectId: string,
+    videoEditor?: VideoEditorProject,
+    pipeline?: SegmentPipelineState
+  ) => Promise<SegmentPipelineState>
+  startPipelineVideos: (
+    projectId: string,
+    videoEditor?: VideoEditorProject,
+    pipeline?: SegmentPipelineState
+  ) => Promise<SegmentPipelineState>
+  pausePipeline: (projectId: string) => Promise<SegmentPipelineState>
+  resumePipeline: (
+    projectId: string,
+    videoEditor?: VideoEditorProject,
+    pipeline?: SegmentPipelineState
+  ) => Promise<SegmentPipelineState>
+  retryPipelineSegment: (
+    projectId: string,
+    segmentId: string,
+    stage: 'image' | 'video' | 'full'
+  ) => Promise<SegmentPipelineState>
+  markPipelineTimeline: (
+    projectId: string,
+    placements: Array<{ segmentId: string; clipId: string }>
+  ) => Promise<GenerationProject>
+  onPipelineUpdated: (
+    callback: (payload: { projectId: string; pipeline: SegmentPipelineState }) => void
+  ) => () => void
+  onPipelineLog: (
+    callback: (event: import('../shared/pipelineDebug').PipelineLogEvent) => void
+  ) => () => void
 }
 
 function subscribe(channel: string, callback: () => void): () => void {
@@ -201,7 +268,52 @@ const api: ElectronAPI = {
   exportVideoSequence: (payload) => ipcRenderer.invoke(IPC.VIDEO_EXPORT, payload),
   saveMediaAs: (payload) => ipcRenderer.invoke(IPC.MEDIA_SAVE_AS, payload),
   saveVideoEditorProject: (project) => ipcRenderer.invoke(IPC.VIDEO_EDITOR_PROJECT_SAVE, project),
-  alignScriptAudio: (payload) => ipcRenderer.invoke(IPC.ALIGN_SCRIPT_AUDIO, payload)
+  alignScriptAudio: (payload) => ipcRenderer.invoke(IPC.ALIGN_SCRIPT_AUDIO, payload),
+  getLlmSettings: () => ipcRenderer.invoke(IPC.LLM_SETTINGS_GET),
+  saveLlmSettings: (settings) => ipcRenderer.invoke(IPC.LLM_SETTINGS_SAVE, settings),
+  analyzeScript: (script) => ipcRenderer.invoke(IPC.LLM_ANALYZE_SCRIPT, script),
+  applyPipelineAnalysis: (projectId, script, pipeline) =>
+    ipcRenderer.invoke(IPC.PROJECT_APPLY_PIPELINE_ANALYSIS, { projectId, script, pipeline }),
+  updateProjectPipeline: (projectId, pipeline) =>
+    ipcRenderer.invoke(IPC.PROJECT_UPDATE_PIPELINE, { projectId, pipeline }),
+  syncPipelineTimelineAudio: (projectId, videoEditor, pipeline) =>
+    ipcRenderer.invoke(IPC.PROJECT_SYNC_PIPELINE_TIMELINE_AUDIO, {
+      projectId,
+      videoEditor,
+      pipeline
+    }),
+  matchPipelineSegmentTimings: (projectId, pipeline) =>
+    ipcRenderer.invoke(IPC.PROJECT_MATCH_PIPELINE_SEGMENT_TIMINGS, {
+      projectId,
+      pipeline
+    }),
+  startPipeline: (projectId, videoEditor, pipeline) =>
+    ipcRenderer.invoke(IPC.PIPELINE_START_IMAGES, { projectId, videoEditor, pipeline }),
+  startPipelineImages: (projectId, videoEditor, pipeline) =>
+    ipcRenderer.invoke(IPC.PIPELINE_START_IMAGES, { projectId, videoEditor, pipeline }),
+  startPipelineVideos: (projectId, videoEditor, pipeline) =>
+    ipcRenderer.invoke(IPC.PIPELINE_START_VIDEOS, { projectId, videoEditor, pipeline }),
+  pausePipeline: (projectId) => ipcRenderer.invoke(IPC.PIPELINE_PAUSE, projectId),
+  resumePipeline: (projectId, videoEditor, pipeline) =>
+    ipcRenderer.invoke(IPC.PIPELINE_RESUME, { projectId, videoEditor, pipeline }),
+  retryPipelineSegment: (projectId, segmentId, stage) =>
+    ipcRenderer.invoke(IPC.PIPELINE_RETRY_SEGMENT, { projectId, segmentId, stage }),
+  markPipelineTimeline: (projectId, placements) =>
+    ipcRenderer.invoke(IPC.PIPELINE_MARK_TIMELINE, { projectId, placements }),
+  onPipelineUpdated: (callback) => {
+    const handler = (
+      _: unknown,
+      payload: { projectId: string; pipeline: SegmentPipelineState }
+    ): void => callback(payload)
+    ipcRenderer.on(IPC.PIPELINE_UPDATED, handler)
+    return () => ipcRenderer.removeListener(IPC.PIPELINE_UPDATED, handler)
+  },
+  onPipelineLog: (callback) => {
+    const handler = (_: unknown, event: import('../shared/pipelineDebug').PipelineLogEvent): void =>
+      callback(event)
+    ipcRenderer.on(IPC.PIPELINE_LOG, handler)
+    return () => ipcRenderer.removeListener(IPC.PIPELINE_LOG, handler)
+  }
 }
 
 contextBridge.exposeInMainWorld('electronAPI', api)
