@@ -23,6 +23,8 @@ protocol.registerSchemesAsPrivileged(
 let mainWindow: BrowserWindow | null = null
 
 function createWindow(): void {
+  const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -44,15 +46,35 @@ function createWindow(): void {
     mainWindow?.show()
   })
 
+  // Don't stay blank forever if ready-to-show never fires (cache / load glitches).
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      mainWindow.show()
+    }
+  }, 2500)
+
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    logInfo('app', 'Renderer failed to load', { code, desc, url })
+    if (isDev && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.openDevTools({ mode: 'detach' })
+      void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL!)
+    }
+  })
+
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    logInfo('app', 'Renderer process gone', details as unknown as Record<string, unknown>)
+  })
+
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
   })
 
-  if (process.env.ELECTRON_RENDERER_URL) {
-    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+  if (isDev) {
+    void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL!)
+    mainWindow.webContents.openDevTools({ mode: 'bottom' })
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
 
