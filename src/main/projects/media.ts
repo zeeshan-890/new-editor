@@ -8,8 +8,10 @@ import type {
   ProjectMedia
 } from '../../shared/types'
 import { generationToModeDraft } from '../../shared/imageGeneration'
+import { normalizePipelineState } from '../../shared/segmentPipeline'
+import { pipelineImageAttachmentsForGeneration } from '../../shared/pipelineImageRefs'
 import { downloadMedia } from '../higgsfield/cli'
-import { importMediaToProject, mediaDir } from './store'
+import { importMediaToProject, loadProject, mediaDir } from './store'
 
 export { mediaDir }
 
@@ -114,6 +116,17 @@ export async function hydrateGenerationDraft(
   generation: ProjectGeneration
 ): Promise<GenerationModeDraft> {
   const draft = generationToModeDraft(generation)
+
+  if (generation.type === 'image' && draft.imageAttachments.length === 0) {
+    const project = await loadProject(projectId)
+    if (project?.pipeline) {
+      const pipeline = normalizePipelineState(project.pipeline)
+      const attachments = pipelineImageAttachmentsForGeneration(pipeline, generation)
+      if (attachments.length > 0) {
+        draft.imageAttachments = attachments
+      }
+    }
+  }
 
   if (generation.type === 'image' && draft.imageAttachments.length > 0) {
     const hydrated: ProjectMedia[] = []
