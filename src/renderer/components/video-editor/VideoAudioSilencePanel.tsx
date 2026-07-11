@@ -79,7 +79,7 @@ export function VideoAudioSilencePanel({
       const meta = await window.electronAPI.probeMediaFile(exported.outputPath)
       replaceClipWithAsset(clipId, {
         path: exported.outputPath,
-        name: `${meta.name.replace(/\.[^.]+$/, '')} (no silence)`,
+        name: meta.name,
         type: 'audio',
         durationMs: meta.durationMs
       })
