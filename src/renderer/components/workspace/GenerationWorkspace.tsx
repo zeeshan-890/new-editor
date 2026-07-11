@@ -1,16 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import {
-  AlertCircle,
-  Clock,
   Download,
   ImagePlus,
-  Loader2,
   LogIn,
   RefreshCw,
   Sparkles,
   Video,
   X,
-  Scissors
+  Scissors,
+  PanelRightOpen
 } from 'lucide-react'
 import { cn } from '@renderer/lib/utils'
 import {
@@ -21,16 +19,15 @@ import {
 } from '@renderer/lib/dropFiles'
 import {
   galleryDragPayloadFromDataTransfer,
-  setGalleryDragData,
   type GalleryDragPayload
 } from '@renderer/lib/galleryDrag'
 import { Button } from '../common/Button'
 import { Label } from '../common/Label'
+import { MediaLightbox } from '../common/MediaLightbox'
 import { Switch } from '../common/Switch'
 import { useProjectTabStore } from '@renderer/stores/projectTabStore'
 import { useHiggsfieldStore } from '@renderer/stores/higgsfieldStore'
 import type {
-  HiggsfieldGenerationJob,
   ProjectGeneration,
   ProjectMedia,
   ScriptAudioMatch
@@ -46,7 +43,8 @@ import {
   IMAGE_ASPECT_RATIOS,
   MANUAL_VIDEO_DURATION_SECONDS,
   VIDEO_ASPECT_RATIOS,
-  generateId
+  generateId,
+  shortProjectId
 } from '@shared/types'
 import { sortImageModels, pickImageModel, imageModelShortLabel } from '@shared/imageModels'
 import {
@@ -59,10 +57,29 @@ import {
 
 import {
   importGenerationIntoEditor,
-  canPreviewVideoInBrowser,
   generationVideoSrc
 } from '@renderer/lib/projectEditorMedia'
 import { localMediaPathUrl } from '@renderer/lib/localFileProtocol'
+import { ProjectGalleryPreview } from './ProjectGalleryPreview'
+import { GalleryHeaderCounts } from './GalleryHeaderCounts'
+import { useProjectGallery } from '@renderer/hooks/useProjectGallery'
+import { PipelineSidebar } from '../pipeline/PipelineSidebar'
+import {
+  PipelineSegmentTabBar,
+  PipelineSegmentTabContent,
+  type PipelineSegmentTab
+} from '../pipeline/PipelineSegmentTabs'
+import {
+  getProjectPipeline,
+  updateSegmentInPipeline,
+  usePipelineStore
+} from '@renderer/stores/pipelineStore'
+import {
+  createEmptyPipelineState,
+  normalizePipelineState,
+  type ScriptSegment,
+  resolvePendingSegmentJobId
+} from '@shared/segmentPipeline'
 
 function isVideoUrl(url: string): boolean {
   return /\.(mp4|webm|mov)(\?|$)/i.test(url)
@@ -103,15 +120,18 @@ export function GenerationWorkspace({
   const appendImageAttachment = useProjectTabStore((s) => s.appendImageAttachment)
   const setTabMode = useProjectTabStore((s) => s.setTabMode)
   const loadGenerationIntoTab = useProjectTabStore((s) => s.loadGenerationIntoTab)
+  const updateTabDraft = useProjectTabStore((s) => s.updateTabDraft)
+  const updateProjectPipelineState = useProjectTabStore((s) => s.updateProjectPipelineState)
+  const approveSegmentImage = useProjectTabStore((s) => s.approveSegmentImage)
+  const discardPendingSegmentImage = useProjectTabStore((s) => s.discardPendingSegmentImage)
   const trackJob = useProjectTabStore((s) => s.trackJob)
-  const handleJobUpdate = useProjectTabStore((s) => s.handleJobUpdate)
   const pendingJobProjects = useProjectTabStore((s) => s.pendingJobProjects)
+  const pendingJobConfigs = useProjectTabStore((s) => s.pendingJobConfigs)
   const openProjectEditorTab = useProjectTabStore((s) => s.openProjectEditorTab)
   const setScriptMatch = useProjectTabStore((s) => s.setScriptMatch)
 
   const jobs = useHiggsfieldStore((s) => s.jobs)
   const queueStats = useHiggsfieldStore((s) => s.queueStats)
-  const subscribeJobUpdates = useHiggsfieldStore((s) => s.subscribeJobUpdates)
   const syncJobs = useHiggsfieldStore((s) => s.syncJobs)
   const refreshHiggsfield = useHiggsfieldStore((s) => s.refreshStatus)
   const status = useHiggsfieldStore((s) => s.status)
@@ -125,6 +145,8 @@ export function GenerationWorkspace({
   const [lightboxItem, setLightboxItem] = useState<ProjectGeneration | null>(null)
   const [dragOverTarget, setDragOverTarget] = useState<'attachments' | 'startFrame' | null>(null)
   const [matchingScript, setMatchingScript] = useState(false)
+  const [pipelineOpen, setPipelineOpen] = useState(true)
+  const [mainTab, setMainTab] = useState<PipelineSegmentTab>('preview')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const startFrameInputRef = useRef<HTMLInputElement>(null)
 
@@ -134,15 +156,7 @@ export function GenerationWorkspace({
   useEffect(() => {
     void refreshHiggsfield()
     void syncJobs()
-    const unsubJobs = subscribeJobUpdates()
-    const unsubProject = window.electronAPI?.onHiggsfieldJobUpdated((job) => {
-      handleJobUpdate(job)
-    })
-    return () => {
-      unsubJobs?.()
-      unsubProject?.()
-    }
-  }, [refreshHiggsfield, syncJobs, subscribeJobUpdates, handleJobUpdate])
+  }, [refreshHiggsfield, syncJobs])
 
   useEffect(() => {
     if (mode !== 'image') return
@@ -161,32 +175,18 @@ export function GenerationWorkspace({
     return () => document.removeEventListener('dragover', onDragOver)
   }, [])
 
-  useEffect(() => {
-    if (!lightboxItem) return
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setLightboxItem(null)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [lightboxItem])
-
-  if (!project) {
-    return (
-      <div className="flex-1 flex items-center justify-center text-muted text-sm">
-        Loading project…
-      </div>
-    )
-  }
-
-  const addGenerationToEditor = async (item: ProjectGeneration): Promise<void> => {
-    setError(null)
-    try {
-      await importGenerationIntoEditor(projectId, item)
-      await openProjectEditorTab(projectId)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }
+  const addGenerationToEditor = useCallback(
+    async (item: ProjectGeneration): Promise<void> => {
+      setError(null)
+      try {
+        await importGenerationIntoEditor(projectId, item)
+        await openProjectEditorTab(projectId)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [openProjectEditorTab, projectId]
+  )
 
   const activeWorkspaceId =
     selectedWorkspaceId || workspaces.find((ws) => ws.isSelected)?.id || workspaces[0]?.id || ''
@@ -343,15 +343,93 @@ export function GenerationWorkspace({
     }
   }
 
-  const activeJobs = jobs.filter(
-    (job) =>
-      pendingJobProjects[job.id] === projectId &&
-      (job.status === 'queued' || job.status === 'running')
+  const activeJobs = useMemo(
+    () =>
+      jobs.filter(
+        (job) =>
+          pendingJobProjects[job.id] === projectId &&
+          (job.status === 'queued' || job.status === 'running')
+      ),
+    [jobs, pendingJobProjects, projectId]
   )
+
+  const updatePipeline = usePipelineStore((s) => s.updatePipeline)
+  const retryPipelineSegment = usePipelineStore((s) => s.retrySegment)
+
+  const pipeline = useMemo(
+    () => normalizePipelineState(project?.pipeline ?? createEmptyPipelineState()),
+    [project?.pipeline]
+  )
+  const trackedJobIds = useMemo(
+    () => new Set(activeJobs.map((job) => job.id)),
+    [activeJobs]
+  )
+  const pipelineRunningSegments = useMemo(
+    () =>
+      [...pipeline.segments]
+        .filter(
+          (segment) =>
+            (segment.status === 'image_running' || segment.status === 'video_running') &&
+            !(
+              (segment.imageJobId && trackedJobIds.has(segment.imageJobId)) ||
+              (segment.videoJobId && trackedJobIds.has(segment.videoJobId))
+            )
+        )
+        .sort((a, b) => a.index - b.index),
+    [pipeline.segments, trackedJobIds]
+  )
+
+  const { lightboxCatalog } = useProjectGallery(projectId)
+  const lightboxIndex = lightboxItem
+    ? lightboxCatalog.findIndex((item) => item.id === lightboxItem.id)
+    : -1
+
+  const openLightbox = useCallback((item: ProjectGeneration): void => {
+    setLightboxItem(item)
+  }, [])
+
+  const closeLightbox = (): void => {
+    setLightboxItem(null)
+  }
+
+  const goToPreviousLightbox = (): void => {
+    if (lightboxIndex > 0) {
+      setLightboxItem(lightboxCatalog[lightboxIndex - 1])
+    }
+  }
+
+  const goToNextLightbox = (): void => {
+    if (lightboxIndex >= 0 && lightboxIndex < lightboxCatalog.length - 1) {
+      setLightboxItem(lightboxCatalog[lightboxIndex + 1])
+    }
+  }
+
+  const lightboxIsVideo =
+    lightboxItem != null &&
+    (lightboxItem.type === 'video' || isVideoUrl(lightboxItem.url))
+  const lightboxMediaSrc = lightboxItem ? generationVideoSrc(lightboxItem) : ''
 
   const projectQueueStats = {
     queued: activeJobs.filter((j) => j.status === 'queued').length,
     running: activeJobs.filter((j) => j.status === 'running').length
+  }
+  const pipelineInProgress =
+    pipeline.pipelineStatus === 'running' &&
+    (projectQueueStats.queued + projectQueueStats.running + pipelineRunningSegments.length > 0 ||
+      pipeline.segments.some((s) =>
+        ['pending', 'image_running', 'video_running', 'audio_match_done', 'image_done'].includes(s.status)
+      ))
+
+  const handleEditPipelineSegment = (
+    segmentId: string,
+    patch: Partial<ScriptSegment>
+  ): void => {
+    const current = getProjectPipeline(projectId)
+    void updatePipeline(
+      projectId,
+      updateSegmentInPipeline(current, segmentId, patch),
+      { debounceMs: 400 }
+    )
   }
 
   const handleGenerate = async (): Promise<void> => {
@@ -379,9 +457,40 @@ export function GenerationWorkspace({
 
     setError(null)
 
+    if (tabState.regenerateSegmentId) {
+      const currentProject = useProjectTabStore.getState().projects[projectId]
+      const currentPipeline = normalizePipelineState(
+        currentProject?.pipeline ?? createEmptyPipelineState()
+      )
+      const segment = currentPipeline.segments.find((s) => s.id === tabState.regenerateSegmentId)
+      if (segment?.pendingImageApproval) {
+        discardPendingSegmentImage(projectId, tabState.regenerateSegmentId)
+      }
+    }
+
     try {
       const job = await window.electronAPI.enqueueHiggsfieldJob(built.enqueue)
       trackJob(job.id, projectId, built.snapshot)
+
+      if (tabState.regenerateSegmentId && tabState.activeMode === 'image') {
+        const currentProject = useProjectTabStore.getState().projects[projectId]
+        const currentPipeline = normalizePipelineState(
+          currentProject?.pipeline ?? createEmptyPipelineState()
+        )
+        updateProjectPipelineState(projectId, {
+          ...currentPipeline,
+          segments: currentPipeline.segments.map((segment) =>
+            segment.id === tabState.regenerateSegmentId
+              ? {
+                  ...segment,
+                  status: 'image_running',
+                  imageJobId: job.id,
+                  error: undefined
+                }
+              : segment
+          )
+        })
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -443,6 +552,51 @@ export function GenerationWorkspace({
     patchDraft({ imageAttachments: list })
   }
 
+  const handleApproveSegmentImage = useCallback(
+    (segmentId: string): void => {
+      approveSegmentImage(projectId, segmentId)
+    },
+    [approveSegmentImage, projectId]
+  )
+
+  const handleGalleryLoadSettings = useCallback(
+    (item: ProjectGeneration): void => {
+      void loadGenerationIntoTab(tabId, projectId, item)
+    },
+    [loadGenerationIntoTab, tabId, projectId]
+  )
+
+  const handleGalleryDownload = useCallback((item: ProjectGeneration): void => {
+    void downloadGeneration(item)
+  }, [])
+
+  const handleGalleryAddToEditor = useCallback(
+    (item: ProjectGeneration): void => {
+      void addGenerationToEditor(item)
+    },
+    [addGenerationToEditor]
+  )
+
+  if (!project) {
+    return (
+      <div className="flex-1 flex items-center justify-center text-muted text-sm">
+        Loading project…
+      </div>
+    )
+  }
+
+  const regenerateSegment = tabDraft.regenerateSegmentId
+    ? pipeline.segments.find((segment) => segment.id === tabDraft.regenerateSegmentId)
+    : undefined
+
+  const lightboxPendingSegment =
+    lightboxItem != null
+      ? pipeline.segments.find((s) => {
+          const pendingJobId = resolvePendingSegmentJobId(lightboxItem.id) ?? lightboxItem.id
+          return s.pendingImageApproval?.jobId === pendingJobId
+        })
+      : undefined
+
   return (
     <div className="flex-1 flex min-h-0 bg-background text-foreground">
       <aside className="w-80 border-r border-border flex flex-col shrink-0 overflow-y-auto">
@@ -455,12 +609,53 @@ export function GenerationWorkspace({
               className="flex-1 bg-transparent font-semibold text-sm focus:outline-none border-b border-transparent focus:border-primary"
             />
           </div>
+          <p className="text-[10px] text-muted font-mono" title={project.id}>
+            Created {new Date(project.createdAt).toLocaleString()} · ID {shortProjectId(project.id)}
+          </p>
 
-          {tabDraft.selectedGenerationId && (
+          {regenerateSegment?.pendingImageApproval ? (
+            <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-2 space-y-2">
+              <p className="text-[10px] font-medium text-amber-700 dark:text-amber-200">
+                Segment {regenerateSegment.index + 1} — new image ready for approval
+              </p>
+              <p className="text-[10px] text-muted">
+                Approve to replace the current image in the gallery, pipeline, and segment
+                references. Generate again to discard this preview and try another version.
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => handleApproveSegmentImage(regenerateSegment.id)}
+                >
+                  Approve & replace
+                </Button>
+                <Button size="sm" variant="outline" className="flex-1" onClick={() => void handleGenerate()}>
+                  Generate again
+                </Button>
+              </div>
+            </div>
+          ) : regenerateSegment && mode === 'image' ? (
+            <div className="text-[10px] text-primary rounded border border-primary/30 bg-primary/5 px-2 py-1.5 space-y-1">
+              <p>
+                Segment {regenerateSegment.index + 1} — edit prompt, context, or references, then
+                regenerate. The new image replaces this segment (any clip for this segment is cleared).
+              </p>
+              <button
+                type="button"
+                className="text-muted hover:text-foreground underline"
+                onClick={() =>
+                  updateTabDraft(tabId, { regenerateSegmentId: null, selectedGenerationId: null })
+                }
+              >
+                Exit segment edit
+              </button>
+            </div>
+          ) : tabDraft.selectedGenerationId ? (
             <p className="text-[10px] text-primary rounded border border-primary/30 bg-primary/5 px-2 py-1">
               Loaded from gallery — edit and queue to generate a new variant
             </p>
-          )}
+          ) : null}
 
           {status && !status.authenticated && (
             <Button size="sm" className="w-full" onClick={() => void login()}>
@@ -891,9 +1086,13 @@ export function GenerationWorkspace({
             </p>
           )}
 
-          {(projectQueueStats.running > 0 || projectQueueStats.queued > 0) && (
+          {(projectQueueStats.running > 0 || projectQueueStats.queued > 0 || pipelineInProgress) && (
             <p className="text-xs text-primary animate-pulse">
+              {pipeline.pipelineStatus === 'running' ? 'Pipeline running · ' : ''}
               Background queue · Running {projectQueueStats.running} · Queued {projectQueueStats.queued}
+              {pipelineRunningSegments.length > 0
+                ? ` · ${pipelineRunningSegments.length} segment${pipelineRunningSegments.length === 1 ? '' : 's'} starting`
+                : ''}
               {queueStats.running + queueStats.queued > projectQueueStats.running + projectQueueStats.queued
                 ? ` (${queueStats.running + queueStats.queued} total app-wide)`
                 : ''}
@@ -905,7 +1104,11 @@ export function GenerationWorkspace({
             disabled={!status?.authenticated}
             onClick={() => void handleGenerate()}
           >
-            Queue {mode} generation
+            {regenerateSegment && mode === 'image'
+              ? regenerateSegment.pendingImageApproval
+                ? 'Generate again'
+                : `Regenerate segment ${regenerateSegment.index + 1} image`
+              : `Queue ${mode} generation`}
           </Button>
 
           <Button size="sm" variant="outline" className="w-full" onClick={() => void refreshHiggsfield()}>
@@ -938,11 +1141,16 @@ export function GenerationWorkspace({
 
       <main className="flex-1 flex flex-col min-w-0 min-h-0">
         <div className="px-4 py-2 border-b border-border flex items-center justify-between shrink-0 gap-2">
-          <span className="text-sm font-medium">
-            Project gallery ({project.generations.length}
-            {activeJobs.length > 0 ? ` · ${activeJobs.length} in progress` : ''})
-          </span>
+          <GalleryHeaderCounts
+            projectId={projectId}
+            inProgress={activeJobs.length + pipelineRunningSegments.length}
+          />
           <div className="flex items-center gap-2 shrink-0">
+            {!pipelineOpen && (
+              <Button size="sm" variant="outline" onClick={() => setPipelineOpen(true)}>
+                <PanelRightOpen size={14} className="mr-1" /> Pipeline
+              </Button>
+            )}
             <Button size="sm" variant="outline" onClick={() => void openProjectEditorTab(projectId)}>
               <Scissors size={14} className="mr-1" /> Video editor
             </Button>
@@ -950,305 +1158,145 @@ export function GenerationWorkspace({
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4">
-          {project.generations.length === 0 && activeJobs.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-muted text-sm gap-2">
-              <Sparkles size={32} className="text-primary/40" />
-              <p>No generations yet. Queue images or videos — they run in the background.</p>
+        <PipelineSegmentTabBar active={mainTab} onChange={setMainTab} />
+
+        <div className="flex-1 min-h-0 flex flex-col">
+          {mainTab === 'preview' ? (
+            <div className="flex-1 min-h-0 p-4">
+              <ProjectGalleryPreview
+                projectId={projectId}
+                selectedGenerationId={tabDraft.selectedGenerationId}
+                onPreview={openLightbox}
+                onLoadSettings={handleGalleryLoadSettings}
+                onDownload={handleGalleryDownload}
+                onAddToEditor={handleGalleryAddToEditor}
+                onApproveSegment={handleApproveSegmentImage}
+              />
             </div>
           ) : (
-            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-              {activeJobs.map((job) => (
-                <PendingJobTile key={job.id} job={job} />
-              ))}
-              {project.generations.map((item, index) => (
-                <GalleryTile
-                  key={item.id}
-                  item={item}
-                  index={project.generations.length - index}
-                  selected={tabDraft.selectedGenerationId === item.id}
-                  onPreview={() => setLightboxItem(item)}
-                  onLoadSettings={() => void loadGenerationIntoTab(tabId, projectId, item)}
-                  onDownload={() => void downloadGeneration(item)}
-                  onAddToEditor={() => void addGenerationToEditor(item)}
-                />
-              ))}
+            <div className="flex-1 overflow-y-auto p-4 min-h-0">
+              <PipelineSegmentTabContent
+                active={mainTab}
+                segments={pipeline.segments}
+                characters={pipeline.characters}
+                onEditSegment={handleEditPipelineSegment}
+                onRetry={(segmentId, stage) => void retryPipelineSegment(projectId, segmentId, stage)}
+              />
             </div>
           )}
         </div>
       </main>
 
+      <PipelineSidebar
+        projectId={projectId}
+        onOpenEditor={() => void openProjectEditorTab(projectId)}
+        open={pipelineOpen}
+        onToggle={() => setPipelineOpen((value) => !value)}
+      />
+
       {lightboxItem && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/92 p-4"
-          onClick={() => setLightboxItem(null)}
-          role="dialog"
-          aria-modal="true"
-          aria-label="Generation preview"
+        <MediaLightbox
+          onClose={closeLightbox}
+          ariaLabel="Generation preview"
+          mediaSrc={lightboxMediaSrc}
+          isVideo={lightboxIsVideo}
+          hasPrevious={lightboxIndex > 0}
+          hasNext={lightboxIndex >= 0 && lightboxIndex < lightboxCatalog.length - 1}
+          onPrevious={goToPreviousLightbox}
+          onNext={goToNextLightbox}
+          positionLabel={
+            lightboxIndex >= 0
+              ? `${lightboxIndex + 1} / ${lightboxCatalog.length}`
+              : undefined
+          }
         >
-          <div
-            className="flex max-w-[96vw] max-h-[92vh] flex-col items-center gap-3"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="relative inline-flex max-w-[96vw] max-h-[78vh]">
-              <div className="absolute top-2 right-2 z-10 flex items-center gap-1 rounded-lg border border-white/15 bg-black/55 p-1 shadow-lg backdrop-blur-sm">
-                <button
-                  type="button"
-                  className="rounded-md p-1.5 text-white/85 hover:bg-white/10 hover:text-white"
-                  title="Load into sidebar"
+          <div className="relative inline-flex max-w-[96vw] max-h-[78vh]">
+            <div className="absolute top-2 right-2 z-10 flex items-center gap-1 rounded-lg border border-white/15 bg-black/55 p-1 shadow-lg backdrop-blur-sm">
+              <button
+                type="button"
+                className="rounded-md p-1.5 text-white/85 hover:bg-white/10 hover:text-white"
+                title="Load into sidebar"
+                onClick={() => {
+                  loadGenerationIntoTab(tabId, projectId, lightboxItem)
+                  closeLightbox()
+                }}
+              >
+                <Sparkles size={18} />
+              </button>
+              <button
+                type="button"
+                className="rounded-md p-1.5 text-white/85 hover:bg-white/10 hover:text-white"
+                title="Add to video editor"
+                onClick={() => {
+                  void addGenerationToEditor(lightboxItem)
+                  closeLightbox()
+                }}
+              >
+                <Scissors size={18} />
+              </button>
+              <button
+                type="button"
+                className="rounded-md p-1.5 text-white/85 hover:bg-white/10 hover:text-white"
+                title="Download"
+                onClick={() => void downloadGeneration(lightboxItem)}
+              >
+                <Download size={18} />
+              </button>
+              <button
+                type="button"
+                className="rounded-md p-1.5 text-white/85 hover:bg-white/10 hover:text-white"
+                title="Close"
+                onClick={closeLightbox}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            {lightboxIsVideo ? (
+              <video
+                src={lightboxMediaSrc}
+                controls
+                autoPlay
+                playsInline
+                preload="metadata"
+                className="max-h-[78vh] max-w-[96vw] rounded-lg shadow-2xl"
+              />
+            ) : (
+              <img
+                src={lightboxMediaSrc}
+                alt={lightboxItem.prompt}
+                className="max-h-[78vh] max-w-[96vw] rounded-lg object-contain shadow-2xl"
+              />
+            )}
+          </div>
+          <div className="max-w-2xl text-center text-sm text-white/80 px-4 space-y-3">
+            <p className="font-medium text-white">{shortModelLabel(lightboxItem.model)}</p>
+            <p className="text-white/70">{lightboxItem.prompt || '—'}</p>
+            {lightboxPendingSegment && (
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <Button
+                  size="sm"
                   onClick={() => {
-                    loadGenerationIntoTab(tabId, projectId, lightboxItem)
-                    setLightboxItem(null)
+                    handleApproveSegmentImage(lightboxPendingSegment.id)
+                    closeLightbox()
                   }}
                 >
-                  <Sparkles size={18} />
-                </button>
-                <button
-                  type="button"
-                  className="rounded-md p-1.5 text-white/85 hover:bg-white/10 hover:text-white"
-                  title="Add to video editor"
+                  Approve & replace segment {lightboxPendingSegment.index + 1}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-white/20 text-white hover:bg-white/10"
                   onClick={() => {
-                    void addGenerationToEditor(lightboxItem)
-                    setLightboxItem(null)
+                    closeLightbox()
+                    void handleGenerate()
                   }}
                 >
-                  <Scissors size={18} />
-                </button>
-                <button
-                  type="button"
-                  className="rounded-md p-1.5 text-white/85 hover:bg-white/10 hover:text-white"
-                  title="Download"
-                  onClick={() => void downloadGeneration(lightboxItem)}
-                >
-                  <Download size={18} />
-                </button>
-                <button
-                  type="button"
-                  className="rounded-md p-1.5 text-white/85 hover:bg-white/10 hover:text-white"
-                  title="Close"
-                  onClick={() => setLightboxItem(null)}
-                >
-                  <X size={18} />
-                </button>
+                  Generate again
+                </Button>
               </div>
-              {lightboxItem.type === 'video' || isVideoUrl(lightboxItem.url) ? (
-                <video
-                  src={generationVideoSrc(lightboxItem)}
-                  controls
-                  autoPlay
-                  playsInline
-                  preload="metadata"
-                  className="max-h-[78vh] max-w-[96vw] rounded-lg shadow-2xl"
-                />
-              ) : (
-                <img
-                  src={lightboxItem.url}
-                  alt={lightboxItem.prompt}
-                  className="max-h-[78vh] max-w-[96vw] rounded-lg object-contain shadow-2xl"
-                />
-              )}
-            </div>
-            <div className="max-w-2xl text-center text-sm text-white/80 px-4">
-              <p className="font-medium text-white">{shortModelLabel(lightboxItem.model)}</p>
-              <p className="mt-1 text-white/70">{lightboxItem.prompt || '—'}</p>
-            </div>
+            )}
           </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function GalleryTile({
-  item,
-  index,
-  selected,
-  onPreview,
-  onLoadSettings,
-  onDownload,
-  onAddToEditor
-}: {
-  item: ProjectGeneration
-  index: number
-  selected: boolean
-  onPreview: () => void
-  onLoadSettings: () => void
-  onDownload: () => void
-  onAddToEditor: () => void
-}): React.JSX.Element {
-  const isVideo = item.type === 'video' || isVideoUrl(item.url)
-  const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  const handleClick = (): void => {
-    if (clickTimer.current) clearTimeout(clickTimer.current)
-    clickTimer.current = setTimeout(() => {
-      onPreview()
-      clickTimer.current = null
-    }, 220)
-  }
-
-  const handleDoubleClick = (): void => {
-    if (clickTimer.current) {
-      clearTimeout(clickTimer.current)
-      clickTimer.current = null
-    }
-    onLoadSettings()
-  }
-
-  return (
-    <div
-      draggable
-      onDragStart={(e) => {
-        e.stopPropagation()
-        setGalleryDragData(e.dataTransfer, item)
-      }}
-      className={cn(
-        'group relative aspect-square rounded-lg border overflow-hidden bg-card cursor-grab active:cursor-grabbing transition-shadow',
-        selected
-          ? 'border-primary ring-2 ring-primary/60 shadow-lg shadow-primary/10'
-          : 'border-border hover:border-primary/40'
-      )}
-      onClick={handleClick}
-      onDoubleClick={handleDoubleClick}
-    >
-      {isVideo ? (
-        canPreviewVideoInBrowser(item) ? (
-          <video
-            src={generationVideoSrc(item)}
-            muted
-            playsInline
-            preload="metadata"
-            className="h-full w-full object-cover pointer-events-none select-none"
-          />
-        ) : (
-          <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-black/50 text-white/70">
-            <Video size={28} />
-            <span className="text-[9px] px-2 text-center">Preview after download</span>
-          </div>
-        )
-      ) : (
-        <img
-          src={item.url}
-          alt={item.prompt}
-          draggable={false}
-          className="h-full w-full object-cover pointer-events-none select-none"
-        />
-      )}
-
-      <div className="absolute top-2 left-2 flex flex-col gap-1 items-start">
-        <span
-          className={cn(
-            'rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
-            isVideo ? 'bg-violet-600/95 text-white' : 'bg-emerald-600/95 text-white'
-          )}
-        >
-          {isVideo ? 'Video' : 'Image'}
-        </span>
-        <span className="rounded bg-black/70 px-1.5 py-0.5 text-[9px] font-medium text-white">
-          #{index}
-        </span>
-        <span className="rounded bg-black/60 px-1.5 py-0.5 text-[9px] text-white/90 max-w-[120px] truncate">
-          {shortModelLabel(item.model)}
-        </span>
-      </div>
-
-      <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100">
-        <button
-          type="button"
-          className="rounded-full bg-black/50 p-1 hover:bg-black/70"
-          title="Load settings into sidebar"
-          onClick={(e) => {
-            e.stopPropagation()
-            onLoadSettings()
-          }}
-        >
-          <Sparkles size={12} className="text-white" />
-        </button>
-        <button
-          type="button"
-          className="rounded-full bg-black/50 p-1 hover:bg-black/70"
-          title="Add to video editor"
-          onClick={(e) => {
-            e.stopPropagation()
-            onAddToEditor()
-          }}
-        >
-          <Scissors size={12} className="text-white" />
-        </button>
-        <button
-          type="button"
-          className="rounded-full bg-black/50 p-1 hover:bg-black/70"
-          title="Download"
-          onClick={(e) => {
-            e.stopPropagation()
-            onDownload()
-          }}
-        >
-          <Download size={12} className="text-white" />
-        </button>
-      </div>
-
-      {selected && (
-        <span className="absolute bottom-10 left-2 rounded bg-primary/90 px-1.5 py-0.5 text-[9px] font-medium text-white">
-          Loaded in sidebar
-        </span>
-      )}
-
-      {!isVideo && (
-        <span className="absolute bottom-10 right-2 rounded bg-black/60 px-1.5 py-0.5 text-[9px] text-white/80 opacity-0 group-hover:opacity-100">
-          Drag to attach
-        </span>
-      )}
-
-      {isVideo && (
-        <span className="absolute bottom-10 right-2 rounded bg-black/60 px-1.5 py-0.5 text-[9px] text-white/80 opacity-0 group-hover:opacity-100">
-          Drag to editor
-        </span>
-      )}
-
-      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/50 to-transparent p-2 pt-6">
-        <p className="text-[10px] text-white line-clamp-2">{item.prompt || '—'}</p>
-      </div>
-    </div>
-  )
-}
-
-function PendingJobTile({ job }: { job: HiggsfieldGenerationJob }): React.JSX.Element {
-  const isVideo = job.category === 'video'
-
-  return (
-    <div className="relative aspect-square rounded-lg border border-primary/40 overflow-hidden bg-card ring-2 ring-primary/20">
-      <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-background/80 p-3 text-center">
-        {job.status === 'queued' ? (
-          <Clock size={22} className="text-muted" />
-        ) : (
-          <Loader2 size={24} className="animate-spin text-primary" />
-        )}
-        <span className="text-[10px] text-muted line-clamp-3">
-          {job.progressMessage ?? (job.status === 'queued' ? 'Queued…' : 'Generating…')}
-        </span>
-      </div>
-      <div className="absolute top-2 left-2 flex flex-col gap-1">
-        <span
-          className={cn(
-            'rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase',
-            isVideo ? 'bg-violet-600/90 text-white' : 'bg-emerald-600/90 text-white'
-          )}
-        >
-          {isVideo ? 'Video' : 'Image'}
-        </span>
-        <span className="rounded bg-amber-600/90 px-1.5 py-0.5 text-[10px] font-medium text-white uppercase">
-          {job.status}
-        </span>
-      </div>
-      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 p-2">
-        <p className="text-[10px] text-white line-clamp-2">{job.prompt.trim() || '—'}</p>
-      </div>
-      {job.status === 'failed' && job.error && (
-        <div className="absolute inset-x-1 bottom-12 flex items-start gap-1 rounded bg-destructive/90 px-1 py-0.5 text-[9px] text-white">
-          <AlertCircle size={10} className="shrink-0 mt-0.5" />
-          <span className="line-clamp-2">{job.error}</span>
-        </div>
+        </MediaLightbox>
       )}
     </div>
   )
