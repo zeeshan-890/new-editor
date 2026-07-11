@@ -13,14 +13,12 @@ export function VideoTimeRuler({
   height = 24,
   scrollMs,
   visibleDurationMs,
-  msToX,
   markers = []
 }: {
   width: number
   height?: number
   scrollMs: number
   visibleDurationMs: number
-  msToX: (ms: number) => number
   markers?: Array<{ id: string; timeMs: number }>
 }): React.JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -42,6 +40,7 @@ export function VideoTimeRuler({
 
     const stepMs = pickRulerStepMs(visibleDurationMs, width)
     const viewEnd = scrollMs + visibleDurationMs
+    const msToX = (ms: number): number => ((ms - scrollMs) / visibleDurationMs) * width
     let tickMs = Math.floor(scrollMs / stepMs) * stepMs
     if (tickMs < scrollMs) tickMs += stepMs
 
@@ -80,7 +79,7 @@ export function VideoTimeRuler({
       ctx.closePath()
       ctx.fill()
     }
-  }, [width, height, scrollMs, visibleDurationMs, msToX, markers])
+  }, [width, height, scrollMs, visibleDurationMs, markers])
 
   return <canvas ref={canvasRef} className="block h-6 w-full max-w-full overflow-hidden" style={{ width: width > 0 ? width : undefined }} />
 }
