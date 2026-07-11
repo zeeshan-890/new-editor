@@ -18,7 +18,22 @@ import {
   sequenceDurationMs
 } from '@shared/types'
 import { normalizePeaks } from '@renderer/lib/audio/normalizePeaks'
-import { usePlaybackStore } from './playbackStore'
+import { usePlayheadStore } from '@renderer/stores/playheadStore'
+import { usePlaybackStore } from '@renderer/stores/playbackStore'
+
+function isDerivedEditAsset(asset: MediaAsset): boolean {
+  const path = asset.path.replace(/\\/g, '/')
+  return /\/ve-audio-\d+\.wav$/i.test(path) || asset.name.includes('(no silence)')
+}
+
+function pruneDerivedOrphans(assets: MediaAsset[], layers: TimelineLayer[]): MediaAsset[] {
+  const referenced = new Set(layers.flatMap((layer) => layer.clips.map((clip) => clip.assetId)))
+  return assets.filter((asset) => referenced.has(asset.id) || !isDerivedEditAsset(asset))
+}
+
+function countAssetUsage(layers: TimelineLayer[], assetId: string): number {
+  return layers.reduce((count, layer) => count + layer.clips.filter((clip) => clip.assetId === assetId).length, 0)
+}
 
 export interface AssetWaveform {
   sampleRate: number
@@ -164,7 +179,7 @@ export const useVideoEditorStore = create<{
   undo: () => void
   redo: () => void
   addAsset: (asset: Omit<MediaAsset, 'id'>) => MediaAsset
-  loadWaveformForAsset: (assetId: string, filePath: string) => Promise<void>
+  loadWaveformForAsset: (assetId: string, filePath: string, force?: boolean) => Promise<void>
   syncAssetDuration: (assetId: string, durationMs: number) => void
   setClipSilenceRegions: (clipId: string, regions: SilenceRegion[]) => void
   clearClipSilenceRegions: (clipId: string) => void
@@ -176,7 +191,10 @@ export const useVideoEditorStore = create<{
   selectLayer: (layerId: string | null) => void
   selectClip: (clipId: string | null) => void
   addClipToLayer: (assetId: string, layerId?: string, atMs?: number) => void
+  addClipToLayerAt: (assetId: string, layerId: string, timelineStartMs: number) => string
+  setMarkers: (markers: TimelineMarker[]) => void
   splitAllAtPlayhead: () => void
+  splitAllAtTime: (timeMs: number) => void
   splitSelectedClipAt: (timeMs: number) => void
   splitClipAtPlayhead: () => void
   trimSelectedClip: (edge: 'in' | 'out', deltaMs: number) => void
@@ -298,11 +316,8 @@ export const useVideoEditorStore = create<{
     set((state) => ({
       project: { ...state.project, assets: [...state.project.assets, asset] }
     }))
-    if (asset.type === 'audio' || asset.type === 'video') {
+    if (asset.type === 'audio') {
       void get().loadWaveformForAsset(asset.id, asset.path)
-    }
-    if (asset.type === 'video' || asset.type === 'image') {
-      void get().loadFilmstripForAsset(asset.id, asset)
     }
     return asset
   },
@@ -333,14 +348,17 @@ export const useVideoEditorStore = create<{
     }
   },
 
-  loadWaveformForAsset: async (assetId, filePath) => {
+  loadWaveformForAsset: async (assetId, filePath, force = false) => {
     const { waveformCache, waveformLoading } = get()
-    if (waveformCache[assetId] || waveformLoading[assetId]) return
+    if (!force && (waveformCache[assetId] || waveformLoading[assetId])) return
     if (!window.electronAPI?.getAudioPeaks) return
 
-    set((state) => ({
-      waveformLoading: { ...state.waveformLoading, [assetId]: true }
-    }))
+    set((state) => {
+      const nextCache = { ...state.waveformCache }
+      const nextLoading = { ...state.waveformLoading, [assetId]: true }
+      if (force) delete nextCache[assetId]
+      return { waveformCache: nextCache, waveformLoading: nextLoading }
+    })
 
     try {
       const result = await window.electronAPI.getAudioPeaks(filePath)
@@ -489,7 +507,7 @@ export const useVideoEditorStore = create<{
     if (!layer || layer.locked) return
 
     get().pushHistory()
-    const playhead = atMs ?? usePlaybackStore.getState().playheadMs
+    const playhead = atMs ?? usePlayheadStore.getState().playheadMs
     const clip: TimelineClip = {
       id: generateId(),
       assetId,
@@ -515,12 +533,65 @@ export const useVideoEditorStore = create<{
     })
   },
 
+  addClipToLayerAt: (assetId, layerId, timelineStartMs) => {
+    const { project } = get()
+    const asset = project.assets.find((a) => a.id === assetId)
+    if (!asset) return ''
+
+    const layer = project.layers.find((l) => l.id === layerId)
+    if (!layer || layer.locked || !isLayerCompatible(layer, asset.type)) return ''
+
+    get().pushHistory()
+    const clip: TimelineClip = {
+      id: generateId(),
+      assetId,
+      layerId: layer.id,
+      timelineStartMs: Math.max(0, timelineStartMs),
+      sourceInMs: 0,
+      sourceOutMs: asset.durationMs
+    }
+
+    set((state) => {
+      const layers = state.project.layers.map((l) =>
+        l.id === layer.id ? { ...l, clips: [...l.clips, clip] } : l
+      )
+      return {
+        project: {
+          ...state.project,
+          layers,
+          selectedClipId: clip.id,
+          selectedLayerId: layer.id
+        },
+        durationMs: sequenceDurationMs(layers)
+      }
+    })
+
+    return clip.id
+  },
+
+  setMarkers: (markers) => {
+    get().pushHistory()
+    set((state) => ({
+      project: {
+        ...state.project,
+        markers: [...markers].sort((a, b) => a.timeMs - b.timeMs)
+      }
+    }))
+  },
+
   splitAllAtPlayhead: () => {
-    const timeMs = usePlaybackStore.getState().playheadMs
+    get().splitAllAtTime(usePlayheadStore.getState().playheadMs)
+  },
+
+  splitAllAtTime: (timeMs) => {
     const { project } = get()
     const hits: Array<{ clip: TimelineClip; layer: TimelineLayer }> = []
 
-    for (const layer of project.layers) {
+    const layersToScan = project.selectedLayerId
+      ? project.layers.filter((layer) => layer.id === project.selectedLayerId)
+      : project.layers
+
+    for (const layer of layersToScan) {
       if (layer.locked) continue
       for (const clip of layer.clips) {
         if (clipContainsTime(clip, timeMs)) {
@@ -584,7 +655,7 @@ export const useVideoEditorStore = create<{
 
   splitClipAtPlayhead: () => {
     const selected = get().getSelectedClip()
-    const playhead = usePlaybackStore.getState().playheadMs
+    const playhead = usePlayheadStore.getState().playheadMs
     if (selected) {
       get().splitSelectedClipAt(playhead)
     } else {
@@ -631,7 +702,7 @@ export const useVideoEditorStore = create<{
     let clipId = project.selectedClipId
 
     if (!clipId) {
-      const timeMs = usePlaybackStore.getState().playheadMs
+      const timeMs = usePlayheadStore.getState().playheadMs
       const layer = project.selectedLayerId
         ? project.layers.find((l) => l.id === project.selectedLayerId)
         : project.layers.find((l) => l.type === 'video')
@@ -694,7 +765,7 @@ export const useVideoEditorStore = create<{
     if (!layer || layer.locked) return
 
     get().pushHistory()
-    const playhead = usePlaybackStore.getState().playheadMs
+    const playhead = usePlayheadStore.getState().playheadMs
     const clip: TimelineClip = {
       id: generateId(),
       assetId: clipClipboard.assetId,
@@ -763,7 +834,7 @@ export const useVideoEditorStore = create<{
     const nextLayer = layers[nextIndex]
     if (!nextLayer) return
 
-    const playhead = usePlaybackStore.getState().playheadMs
+    const playhead = usePlayheadStore.getState().playheadMs
     const clipOnLayer = nextLayer.clips.find(
       (c) =>
         playhead >= c.timelineStartMs &&
@@ -780,7 +851,7 @@ export const useVideoEditorStore = create<{
   },
 
   addMarkerAtPlayhead: () => {
-    const timeMs = usePlaybackStore.getState().playheadMs
+    const timeMs = usePlayheadStore.getState().playheadMs
     const { project } = get()
     if ((project.markers ?? EMPTY_TIMELINE_MARKERS).some((m) => Math.abs(m.timeMs - timeMs) < 50)) return
 
@@ -801,15 +872,20 @@ export const useVideoEditorStore = create<{
   },
 
   loadFromGenerationProject: (projectId, projectName, saved) => {
-    const project = normalizeVideoEditorProject(saved, projectName)
+    const normalized = normalizeVideoEditorProject(saved, projectName)
+    const layers = normalized.layers
+    const assets = pruneDerivedOrphans(normalized.assets, layers)
+    const project = { ...normalized, assets }
     set({
       boundProjectId: projectId,
       project: { ...project, id: project.id || projectId, name: projectName },
-      durationMs: sequenceDurationMs(project.layers),
+      durationMs: sequenceDurationMs(layers),
       undoStack: [],
       redoStack: [],
       silenceRegionsByClipId: {},
-      clipClipboard: null
+      clipClipboard: null,
+      waveformCache: {},
+      waveformLoading: {}
     })
   },
 
@@ -941,20 +1017,78 @@ export const useVideoEditorStore = create<{
   },
 
   replaceClipWithAsset: (clipId, assetInput) => {
-    const asset: MediaAsset = { ...assetInput, id: generateId() }
+    const { project } = get()
+    const clip = project.layers.flatMap((layer) => layer.clips).find((item) => item.id === clipId)
+    if (!clip) return
+
+    const oldAssetId = clip.assetId
+    const oldAsset = project.assets.find((asset) => asset.id === oldAssetId)
+    const usageCount = countAssetUsage(project.layers, oldAssetId)
+
     get().pushHistory()
+
+    if (usageCount <= 1) {
+      set((state) => {
+        const layers = state.project.layers.map((layer) => ({
+          ...layer,
+          clips: layer.clips.map((item) =>
+            item.id === clipId
+              ? {
+                  ...item,
+                  sourceInMs: 0,
+                  sourceOutMs: assetInput.durationMs
+                }
+              : item
+          )
+        }))
+        const assets = pruneDerivedOrphans(
+          state.project.assets.map((asset) =>
+            asset.id === oldAssetId
+              ? {
+                  ...asset,
+                  ...assetInput,
+                  id: oldAssetId,
+                  name: oldAsset?.name ?? assetInput.name
+                }
+              : asset
+          ),
+          layers
+        )
+        const { [clipId]: _, ...silenceRegionsByClipId } = state.silenceRegionsByClipId
+        const { [oldAssetId]: __, ...waveformCache } = state.waveformCache
+        return {
+          project: {
+            ...state.project,
+            assets,
+            layers,
+            selectedClipId: clipId
+          },
+          durationMs: sequenceDurationMs(layers),
+          silenceRegionsByClipId,
+          waveformCache
+        }
+      })
+      void get().loadWaveformForAsset(oldAssetId, assetInput.path, true)
+      return
+    }
+
+    const asset: MediaAsset = {
+      ...assetInput,
+      id: generateId(),
+      name: oldAsset?.name ?? assetInput.name
+    }
     set((state) => {
-      const layers = state.project.layers.map((l) => ({
-        ...l,
-        clips: l.clips.map((c) =>
-          c.id === clipId
+      const layers = state.project.layers.map((layer) => ({
+        ...layer,
+        clips: layer.clips.map((item) =>
+          item.id === clipId
             ? {
-                ...c,
+                ...item,
                 assetId: asset.id,
                 sourceInMs: 0,
-                sourceOutMs: asset.durationMs
+                sourceOutMs: assetInput.durationMs
               }
-            : c
+            : item
         )
       }))
       const { [clipId]: _, ...silenceRegionsByClipId } = state.silenceRegionsByClipId
@@ -969,12 +1103,7 @@ export const useVideoEditorStore = create<{
         silenceRegionsByClipId
       }
     })
-    if (asset.type === 'audio' || asset.type === 'video') {
-      void get().loadWaveformForAsset(asset.id, asset.path)
-    }
-    if (asset.type === 'video' || asset.type === 'image') {
-      void get().loadFilmstripForAsset(asset.id, asset)
-    }
+    void get().loadWaveformForAsset(asset.id, asset.path)
   },
 
   clipsAtPlayhead: (timeMs) => {
