@@ -3,16 +3,17 @@ import {
   clampTimelineScrollMs,
   zoomTimelineAt
 } from '@renderer/lib/timelineView'
+import { usePlayheadStore } from './playheadStore'
+
+export type TimelineTool = 'select' | 'split'
 
 interface PlaybackState {
-  playheadMs: number
-  isPlaying: boolean
   loopSelection: boolean
   zoom: number
   scrollMs: number
+  timelineTool: TimelineTool
 
-  setPlayheadMs: (ms: number) => void
-  setIsPlaying: (playing: boolean) => void
+  setTimelineTool: (tool: TimelineTool) => void
   setLoopSelection: (loop: boolean) => void
   setZoom: (zoom: number, durationMs?: number) => void
   setScrollMs: (ms: number, durationMs?: number) => void
@@ -23,14 +24,12 @@ interface PlaybackState {
 }
 
 export const usePlaybackStore = create<PlaybackState>((set) => ({
-  playheadMs: 0,
-  isPlaying: false,
   loopSelection: false,
   zoom: 1,
   scrollMs: 0,
+  timelineTool: 'select',
 
-  setPlayheadMs: (playheadMs) => set({ playheadMs }),
-  setIsPlaying: (isPlaying) => set({ isPlaying }),
+  setTimelineTool: (timelineTool) => set({ timelineTool }),
   setLoopSelection: (loopSelection) => set({ loopSelection }),
   setZoom: (zoom, durationMs) =>
     set((s) => {
@@ -53,7 +52,7 @@ export const usePlaybackStore = create<PlaybackState>((set) => ({
       if (durationMs == null) {
         return { zoom: Math.min(100, s.zoom * 1.25) }
       }
-      const anchor = anchorMs ?? s.playheadMs
+      const anchor = anchorMs ?? usePlayheadStore.getState().playheadMs
       const visible = durationMs / s.zoom
       const ratio =
         anchorViewportRatio ?? (visible > 0 ? (anchor - s.scrollMs) / visible : 0.5)
@@ -64,13 +63,16 @@ export const usePlaybackStore = create<PlaybackState>((set) => ({
       if (durationMs == null) {
         return { zoom: Math.max(0.1, s.zoom / 1.25) }
       }
-      const anchor = anchorMs ?? s.playheadMs
+      const anchor = anchorMs ?? usePlayheadStore.getState().playheadMs
       const visible = durationMs / s.zoom
       const ratio =
         anchorViewportRatio ?? (visible > 0 ? (anchor - s.scrollMs) / visible : 0.5)
       return zoomTimelineAt(durationMs, s.zoom, s.scrollMs, 1 / 1.25, anchor, ratio)
     }),
-  fitTimelineView: () => set({ scrollMs: 0, playheadMs: 0, zoom: 1 }),
+  fitTimelineView: () => {
+    usePlayheadStore.getState().resetPlayhead()
+    set({ scrollMs: 0, zoom: 1 })
+  },
   clampScrollToDuration: (durationMs) =>
     set((s) => ({
       scrollMs: clampTimelineScrollMs(durationMs, s.zoom, s.scrollMs)
