@@ -1,4 +1,3 @@
-export type DetectionMode = 'traditional' | 'ai-vad' | 'hybrid'
 export type HybridMerge = 'intersection' | 'union'
 export type RegionSource = 'traditional' | 'vad' | 'hybrid' | 'manual'
 export type EditOperationType = 'keep' | 'remove'
@@ -108,6 +107,25 @@ export const DEFAULT_DETECTION_PARAMS: DetectionParams = {
 
 export function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+}
+
+/** Last segment of a project id, for compact display (e.g. `abc12xy`). */
+export function shortProjectId(id: string): string {
+  const parts = id.split('-')
+  return parts[parts.length - 1] ?? id.slice(-7)
+}
+
+/** Default name for a newly created project — includes date, time, and short id. */
+export function formatDefaultProjectName(now = Date.now(), idSuffix?: string): string {
+  const label = new Date(now).toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  })
+  const suffix = idSuffix ? ` · ${idSuffix}` : ''
+  return `Project ${label}${suffix}`
 }
 
 export type HiggsfieldModelCategory = 'audio' | 'image' | 'video'
@@ -268,6 +286,8 @@ export interface ScriptAudioMatch {
   endMs: number
   durationMs: number
   confidence: number
+  /** How this segment timing was obtained. */
+  matchSource?: 'forced-align' | 'word-aligned' | 'sequential' | 'weighted-fallback' | 'equal-fallback'
   assetId?: string
   clipId?: string
   matchedAt: number
@@ -322,6 +342,8 @@ export interface TabComposerState {
   image: GenerationModeDraft
   video: GenerationModeDraft
   selectedGenerationId: string | null
+  /** When set, the next image generation replaces this pipeline segment's image. */
+  regenerateSegmentId: string | null
 }
 
 export interface GenerationComposerSnapshot {
@@ -342,6 +364,8 @@ export interface GenerationComposerSnapshot {
   linkedClipSourceInMs: number | null
   linkedClipSourceOutMs: number | null
   autoExtraDurationSeconds: number
+  regenerateSegmentId?: string | null
+  replacesGenerationId?: string | null
 }
 
 export interface GenerationProject {
@@ -363,11 +387,14 @@ export interface GenerationProject {
   /** Timeline state for this project's video editor tab. */
   videoEditor?: VideoEditorProject
   workspaceId?: string
+  /** Script-to-video pipeline state. */
+  pipeline?: import('./segmentPipeline').SegmentPipelineState
 }
 
 export interface ProjectSummary {
   id: string
   name: string
+  createdAt: number
   updatedAt: number
   generationCount: number
   mode: GenerationMode
@@ -551,7 +578,8 @@ export function createEmptyTabComposerState(): TabComposerState {
     activeMode: 'image',
     image: createEmptyModeDraft('image'),
     video: createEmptyModeDraft('video'),
-    selectedGenerationId: null
+    selectedGenerationId: null,
+    regenerateSegmentId: null
   }
 }
 
@@ -569,6 +597,7 @@ export function normalizeTabComposerState(state: TabComposerState | undefined): 
   return {
     activeMode: state.activeMode === 'video' ? 'video' : 'image',
     selectedGenerationId: state.selectedGenerationId ?? null,
+    regenerateSegmentId: state.regenerateSegmentId ?? null,
     video: {
       ...empty.video,
       ...state.video,
@@ -625,9 +654,11 @@ export function normalizeVideoEditorProject(
 
 export function normalizeGenerationProject(project: GenerationProject): GenerationProject {
   const empty = createEmptyGenerationProject(project.name)
+  const createdAt = project.createdAt ?? project.updatedAt ?? empty.createdAt
   return {
     ...empty,
     ...project,
+    createdAt,
     generations: Array.isArray(project.generations) ? project.generations : [],
     imageAttachments: Array.isArray(project.imageAttachments) ? project.imageAttachments : [],
     videoStartFrame: project.videoStartFrame ?? null,
@@ -635,7 +666,8 @@ export function normalizeGenerationProject(project: GenerationProject): Generati
     composer: normalizeTabComposerState(project.composer),
     videoEditor: project.videoEditor
       ? normalizeVideoEditorProject(project.videoEditor, project.name)
-      : undefined
+      : undefined,
+    pipeline: project.pipeline
   }
 }
 
@@ -643,9 +675,10 @@ export { generationToModeDraft, buildEffectivePrompt } from './imageGeneration'
 
 export function createEmptyGenerationProject(name?: string): GenerationProject {
   const now = Date.now()
+  const id = generateId()
   return {
-    id: generateId(),
-    name: name ?? `Project ${new Date(now).toLocaleDateString()}`,
+    id,
+    name: name ?? formatDefaultProjectName(now, shortProjectId(id)),
     createdAt: now,
     updatedAt: now,
     mode: 'image',
