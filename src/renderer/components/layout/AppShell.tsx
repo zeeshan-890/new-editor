@@ -4,6 +4,7 @@ import { VideoEditorShell } from '../video-editor/VideoEditorShell'
 import { GenerationWorkspace } from '../workspace/GenerationWorkspace'
 import { ProjectsPage } from '../projects/ProjectsPage'
 import { useProjectTabStore } from '@renderer/stores/projectTabStore'
+import { startBackgroundServices } from '@renderer/lib/backgroundServices'
 
 export function AppShell(): React.JSX.Element {
   const initialized = useProjectTabStore((s) => s.initialized)
@@ -16,6 +17,11 @@ export function AppShell(): React.JSX.Element {
   useEffect(() => {
     void init()
   }, [init])
+
+  useEffect(() => {
+    if (!initialized) return
+    return startBackgroundServices()
+  }, [initialized])
 
   useEffect(() => {
     const onBeforeUnload = (): void => {
