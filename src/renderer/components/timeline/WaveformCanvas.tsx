@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useEditorStore } from '@renderer/stores/editorStore'
-import { usePlaybackStore } from '@renderer/stores/playbackStore'
+import { usePlayheadStore } from '@renderer/stores/playheadStore'
 import { selectPeakLevel } from '@renderer/lib/audio/peaks'
 
 interface WaveformCanvasProps {
@@ -19,7 +19,7 @@ export function WaveformCanvas({ width, height, msToX }: WaveformCanvasProps): R
   const operations = useEditorStore((s) => s.operations)
   const scrollMs = usePlaybackStore((s) => s.scrollMs)
   const zoom = usePlaybackStore((s) => s.zoom)
-  const playheadMs = usePlaybackStore((s) => s.playheadMs)
+  const playheadMs = usePlayheadStore((s) => s.playheadMs)
 
   useEffect(() => {
     const canvas = canvasRef.current

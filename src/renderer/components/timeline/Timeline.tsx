@@ -3,7 +3,7 @@ import { TimeRuler } from './TimeRuler'
 import { WaveformCanvas } from './WaveformCanvas'
 import { useTimelineInteraction } from '@renderer/hooks/useTimelineInteraction'
 import { useEditorStore } from '@renderer/stores/editorStore'
-import { usePlaybackStore } from '@renderer/stores/playbackStore'
+import { usePlayheadStore } from '@renderer/stores/playheadStore'
 
 interface TimelineProps {
   onSeek: (ms: number) => void
@@ -13,7 +13,7 @@ export function Timeline({ onSeek }: TimelineProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(0)
   const metadata = useEditorStore((s) => s.metadata)
-  const playheadMs = usePlaybackStore((s) => s.playheadMs)
+  const playheadMs = usePlayheadStore((s) => s.playheadMs)
 
   const {
     msToX,
