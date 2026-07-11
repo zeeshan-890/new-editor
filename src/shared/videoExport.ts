@@ -122,3 +122,19 @@ export function suggestExportPreset(
 export function exportDurationMs(layers: TimelineLayer[]): number {
   return sequenceDurationMs(layers)
 }
+
+export type TimelineAudioExportFormat = 'wav' | 'mp3' | 'flac'
+
+export const TIMELINE_AUDIO_EXPORT_FORMATS: Array<{
+  id: TimelineAudioExportFormat
+  label: string
+  extension: string
+}> = [
+  { id: 'wav', label: 'WAV (lossless)', extension: 'wav' },
+  { id: 'mp3', label: 'MP3', extension: 'mp3' },
+  { id: 'flac', label: 'FLAC', extension: 'flac' }
+]
+
+export function hasTimelineAudioClips(layers: TimelineLayer[]): boolean {
+  return layers.some((layer) => layer.type === 'audio' && !layer.muted && layer.clips.length > 0)
+}
