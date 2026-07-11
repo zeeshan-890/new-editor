@@ -7,6 +7,7 @@ import { ExportPanel } from '../inspector/ExportPanel'
 import { InspectorTabs, type InspectorTab } from '../inspector/InspectorTabs'
 import { Dialog, DialogRow } from '../common/Dialog'
 import { useEditorStore } from '@renderer/stores/editorStore'
+import { usePlayheadStore } from '@renderer/stores/playheadStore'
 import { usePlaybackStore } from '@renderer/stores/playbackStore'
 import { useAudioPlayer, useKeyboardShortcuts } from '@renderer/hooks/useKeyboardShortcuts'
 import { localAudioPathUrl } from '@renderer/lib/localFileProtocol'
@@ -30,10 +31,10 @@ export function EditorShell({ embedded = false }: { embedded?: boolean }): React
   const previewNonSilence = useEditorStore((s) => s.previewNonSilence)
   const metadata = useEditorStore((s) => s.metadata)
 
-  const setPlayheadMs = usePlaybackStore((s) => s.setPlayheadMs)
-  const setIsPlaying = usePlaybackStore((s) => s.setIsPlaying)
-  const isPlaying = usePlaybackStore((s) => s.isPlaying)
-  const playheadMs = usePlaybackStore((s) => s.playheadMs)
+  const setPlayheadMs = usePlayheadStore((s) => s.setPlayheadMs)
+  const setIsPlaying = usePlayheadStore((s) => s.setIsPlaying)
+  const isPlaying = usePlayheadStore((s) => s.isPlaying)
+  const playheadMs = usePlayheadStore((s) => s.playheadMs)
 
   const loadFile = useCallback(
     async (filePath: string) => {
@@ -136,7 +137,7 @@ export function EditorShell({ embedded = false }: { embedded?: boolean }): React
       player.pause()
       setIsPlaying(false)
     } else {
-      player.play(usePlaybackStore.getState().playheadMs)
+      player.play(usePlayheadStore.getState().playheadMs)
       setIsPlaying(true)
     }
   }
@@ -149,7 +150,7 @@ export function EditorShell({ embedded = false }: { embedded?: boolean }): React
 
   const handleSeek = useCallback(
     (ms: number) => {
-      if (usePlaybackStore.getState().isPlaying) {
+      if (usePlayheadStore.getState().isPlaying) {
         playerRef.current?.seek(ms)
       }
     },
