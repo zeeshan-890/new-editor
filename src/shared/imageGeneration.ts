@@ -16,6 +16,7 @@ import {
   clampVideoDurationSeconds,
   DEFAULT_ASPECT_RATIO
 } from './types'
+import { applyVideoSoundParams } from './videoGeneration'
 
 export function buildEffectivePrompt(
   prompt: string,
@@ -138,10 +139,10 @@ export function buildImageGenerationRequest(
     category: mode,
     references,
     projectId: input.projectId,
-    params: {
+    params: applyVideoSoundParams(draft.model, {
       aspect_ratio: draft.aspectRatio,
       ...(mode === 'video' ? { duration: String(resolveVideoDurationSeconds(draft)) } : {})
-    },
+    }),
     mediaPath: mode === 'video' ? draft.videoStartFrame?.localPath : undefined,
     mediaFlag: mode === 'video' && draft.videoStartFrame ? 'start-image' : undefined,
     wait: true,
@@ -150,7 +151,11 @@ export function buildImageGenerationRequest(
 
   return {
     enqueue,
-    snapshot: buildComposerSnapshot(mode, draft),
+    snapshot: {
+      ...buildComposerSnapshot(mode, draft),
+      regenerateSegmentId: input.tabState.regenerateSegmentId ?? null,
+      replacesGenerationId: input.tabState.selectedGenerationId
+    },
     effectivePrompt,
     referenceCount: references.length
   }
