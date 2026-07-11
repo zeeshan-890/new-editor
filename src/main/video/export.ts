@@ -210,3 +210,91 @@ export async function exportVideoSequence(
 
   return { outputPath: mp4OutputPath, durationMs }
 }
+
+function codecArgsForAudioExport(outputPath: string): string[] {
+  const ext = extname(outputPath).toLowerCase()
+  switch (ext) {
+    case '.mp3':
+      return ['-c:a', 'libmp3lame', '-b:a', '192k']
+    case '.flac':
+      return ['-c:a', 'flac']
+    case '.wav':
+    default:
+      return ['-c:a', 'pcm_s16le']
+  }
+}
+
+/** Mix audio-layer timeline clips (respects splits, silence edits, clip positions). */
+export async function exportTimelineAudioMix(
+  assets: MediaAsset[],
+  layers: TimelineLayer[],
+  outputPath: string
+): Promise<{ outputPath: string; durationMs: number }> {
+  const durationMs = sequenceDurationMs(layers)
+  const durationSec = Math.max(durationMs / 1000, 0.1)
+  const audioClipCandidates = collectAudioClips(assets, layers, false)
+
+  if (audioClipCandidates.length === 0) {
+    throw new Error('No audio clips on the video editor timeline. Add and edit audio in the editor first.')
+  }
+
+  for (const { asset } of audioClipCandidates) {
+    if (!existsSync(asset.path)) {
+      throw new Error(`Missing media file: ${asset.name}`)
+    }
+  }
+
+  const audioClips: typeof audioClipCandidates = []
+  for (const ref of audioClipCandidates) {
+    if (ref.asset.type === 'audio' || (await probeHasAudio(ref.asset.path))) {
+      audioClips.push(ref)
+    }
+  }
+
+  if (audioClips.length === 0) {
+    throw new Error('Timeline audio clips have no decodable audio streams.')
+  }
+
+  const args: string[] = ['-y']
+  const filters: string[] = []
+  let inputIndex = 0
+
+  for (let i = 0; i < audioClips.length; i++) {
+    const { clip, asset } = audioClips[i]
+    args.push(...buildAudioInputArgs(asset, clip))
+    const delayMs = Math.round(clip.timelineStartMs)
+    const aLabel = `a${i}`
+    filters.push(
+      `[${inputIndex}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS,adelay=${delayMs}|${delayMs}[${aLabel}]`
+    )
+    inputIndex++
+  }
+
+  let audioOutLabel: string
+  if (audioClips.length === 1) {
+    audioOutLabel = 'a0'
+  } else {
+    const mixInputs = audioClips.map((_, i) => `[a${i}]`).join('')
+    filters.push(
+      `${mixInputs}amix=inputs=${audioClips.length}:duration=longest:dropout_transition=0[aout]`
+    )
+    audioOutLabel = 'aout'
+  }
+
+  args.push('-filter_complex', filters.join(';'))
+  args.push('-map', `[${audioOutLabel}]`)
+  args.push('-ar', '48000', '-ac', '2', ...codecArgsForAudioExport(outputPath), '-t', durationSec.toFixed(3), outputPath)
+
+  try {
+    await runFfmpeg(args)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    throw new Error(
+      message.includes('Stream specifier')
+        ? 'Could not mix timeline audio. Check audio clips on the timeline and try again.'
+        : message
+    )
+  }
+
+  return { outputPath, durationMs }
+}
