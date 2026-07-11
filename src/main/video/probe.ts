@@ -19,6 +19,10 @@ function detectType(filePath: string): MediaAssetType {
   return 'video'
 }
 
+export async function probeMediaDurationMs(filePath: string): Promise<number> {
+  return probeDuration(filePath)
+}
+
 function probeDuration(filePath: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const proc = spawn(FFMPEG, ['-i', filePath, '-f', 'null', '-'], { windowsHide: true })
