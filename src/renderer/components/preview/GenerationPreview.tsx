@@ -8,6 +8,7 @@ import {
   ZoomIn
 } from 'lucide-react'
 import { cn } from '@renderer/lib/utils'
+import { MediaLightbox } from '../common/MediaLightbox'
 import { useHiggsfieldStore } from '@renderer/stores/higgsfieldStore'
 import { HIGGSFIELD_DRAG_MIME } from '@shared/types'
 import type { HiggsfieldGenerationJob, HiggsfieldVisualGeneration } from '@shared/types'
@@ -36,63 +37,49 @@ function toLightboxItem(job: HiggsfieldGenerationJob): HiggsfieldVisualGeneratio
   }
 }
 
-function MediaLightbox({
+function PreviewLightbox({
   item,
   onClose
 }: {
   item: HiggsfieldVisualGeneration
   onClose: () => void
 }): React.JSX.Element {
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/92 p-4"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Generated media preview"
+    <MediaLightbox
+      onClose={onClose}
+      ariaLabel="Generated media preview"
+      mediaSrc={item.url}
+      isVideo={item.mediaType === 'video'}
     >
-      <div
-        className="flex max-w-[96vw] max-h-[92vh] flex-col items-center gap-3"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="relative inline-flex max-w-[96vw] max-h-[82vh]">
-          <button
-            type="button"
-            onClick={onClose}
-            className="absolute top-2 right-2 z-10 rounded-lg border border-white/15 bg-black/55 p-1.5 text-white/85 shadow-lg backdrop-blur-sm hover:bg-black/70 hover:text-white transition-colors"
-            aria-label="Close preview"
-          >
-            <X size={18} />
-          </button>
-          {item.mediaType === 'video' ? (
-            <video
-              src={item.url}
-              controls
-              autoPlay
-              className="max-h-[82vh] max-w-[96vw] rounded-lg shadow-2xl"
-            />
-          ) : (
-            <img
-              src={item.url}
-              alt={item.prompt}
-              className="max-h-[82vh] max-w-[96vw] rounded-lg object-contain shadow-2xl"
-            />
-          )}
-        </div>
-        <div className="max-w-2xl text-center text-sm text-white/80">
-          <p className="font-medium text-white">{item.model}</p>
-          <p className="mt-1 text-white/70">{item.prompt}</p>
-        </div>
+      <div className="relative inline-flex max-w-[96vw] max-h-[82vh]">
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute top-2 right-2 z-10 rounded-lg border border-white/15 bg-black/55 p-1.5 text-white/85 shadow-lg backdrop-blur-sm hover:bg-black/70 hover:text-white transition-colors"
+          aria-label="Close preview"
+        >
+          <X size={18} />
+        </button>
+        {item.mediaType === 'video' ? (
+          <video
+            src={item.url}
+            controls
+            autoPlay
+            className="max-h-[82vh] max-w-[96vw] rounded-lg shadow-2xl"
+          />
+        ) : (
+          <img
+            src={item.url}
+            alt={item.prompt}
+            className="max-h-[82vh] max-w-[96vw] rounded-lg object-contain shadow-2xl"
+          />
+        )}
       </div>
-    </div>
+      <div className="max-w-2xl text-center text-sm text-white/80">
+        <p className="font-medium text-white">{item.model}</p>
+        <p className="mt-1 text-white/70">{item.prompt}</p>
+      </div>
+    </MediaLightbox>
   )
 }
 
@@ -283,7 +270,7 @@ export function GenerationPreview({ className }: { className?: string }): React.
       </section>
 
       {lightboxItem && (
-        <MediaLightbox item={lightboxItem} onClose={() => setLightboxItem(null)} />
+        <PreviewLightbox item={lightboxItem} onClose={() => setLightboxItem(null)} />
       )}
     </>
   )
