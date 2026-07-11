@@ -24,6 +24,7 @@ import {
   uploadLocalMedia
 } from './cli'
 import { logError, logInfo, logWarn } from '../logger'
+import { applyVideoSoundParams } from '../../shared/videoGeneration'
 
 const FALLBACK_AUDIO_MODELS: HiggsfieldModel[] = [
   { id: 'text2speech_v2', name: 'Text to Speech', category: 'audio' },
@@ -507,7 +508,12 @@ export async function generateHiggsfieldContent(
     args.push('--wait', '--wait-timeout', request.waitTimeout ?? '10m')
   }
 
-  for (const [key, value] of Object.entries(request.params ?? {})) {
+  const cliParams =
+    request.category === 'video'
+      ? applyVideoSoundParams(request.model, { ...(request.params ?? {}) })
+      : { ...(request.params ?? {}) }
+
+  for (const [key, value] of Object.entries(cliParams)) {
     if (value === undefined || value === null || value === '') continue
     args.push(`--${key}`, String(value))
   }
