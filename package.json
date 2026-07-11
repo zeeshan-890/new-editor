@@ -14,7 +14,8 @@
     "dist:alt": "node scripts/clean-release.mjs release-build && npm run build && electron-builder --win nsis --config.directories.output=release-build",
     "dist:portable": "npm run build && electron-builder --win portable",
     "dist:dir": "npm run build && electron-builder --win dir",
-    "postinstall": "node scripts/install-electron.js"
+    "postinstall": "node scripts/install-electron.js",
+    "install:whisper": "node scripts/install-whisper.mjs"
   },
   "dependencies": {
     "@higgsfield/cli": "^1.1.5",
