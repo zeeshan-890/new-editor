@@ -1,5 +1,6 @@
 import { useHotkeys } from 'react-hotkeys-hook'
 import { useVideoEditorStore } from '@renderer/stores/videoEditorStore'
+import { usePlayheadStore } from '@renderer/stores/playheadStore'
 import { usePlaybackStore } from '@renderer/stores/playbackStore'
 import {
   VIDEO_EDITOR_FRAME_MS,
@@ -20,19 +21,26 @@ export function useVideoEditorHotkeys(options?: { onExport?: () => void }): void
   const addMarkerAtPlayhead = useVideoEditorStore((s) => s.addMarkerAtPlayhead)
   const saveProjectToFile = useVideoEditorStore((s) => s.saveProjectToFile)
 
-  const isPlaying = usePlaybackStore((s) => s.isPlaying)
-  const setIsPlaying = usePlaybackStore((s) => s.setIsPlaying)
-  const playheadMs = usePlaybackStore((s) => s.playheadMs)
-  const setPlayheadMs = usePlaybackStore((s) => s.setPlayheadMs)
+  const isPlaying = usePlayheadStore((s) => s.isPlaying)
+  const setIsPlaying = usePlayheadStore((s) => s.setIsPlaying)
+  const playheadMs = usePlayheadStore((s) => s.playheadMs)
+  const setPlayheadMs = usePlayheadStore((s) => s.setPlayheadMs)
   const durationMs = useVideoEditorStore((s) => s.durationMs)
   const zoomIn = usePlaybackStore((s) => s.zoomIn)
   const zoomOut = usePlaybackStore((s) => s.zoomOut)
+  const setTimelineTool = usePlaybackStore((s) => s.setTimelineTool)
 
   const nudgePlayhead = (deltaMs: number): void => {
     setPlayheadMs(Math.max(0, Math.min(durationMs, playheadMs + deltaMs)))
   }
 
   useHotkeys('mod+b', () => splitClipAtPlayhead(), { ...HOTKEY_OPTS }, [splitClipAtPlayhead])
+
+  useHotkeys('a', () => setTimelineTool('select'), { ...HOTKEY_OPTS }, [setTimelineTool])
+
+  useHotkeys('b', () => setTimelineTool('split'), { ...HOTKEY_OPTS }, [setTimelineTool])
+
+  useHotkeys('q', () => deleteSelectedClip(), { ...HOTKEY_OPTS }, [deleteSelectedClip])
 
   useHotkeys('delete,backspace', () => deleteSelectedClip(), { ...HOTKEY_OPTS }, [deleteSelectedClip])
 
