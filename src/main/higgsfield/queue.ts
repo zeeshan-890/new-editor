@@ -14,7 +14,9 @@ import {
 } from './service'
 import { ensureReferencesInProject } from '../projects/media'
 
-const MAX_CONCURRENCY = Number.POSITIVE_INFINITY
+import { HIGGSFIELD_MAX_CONCURRENCY } from '../pipeline/limits'
+
+const MAX_CONCURRENCY = HIGGSFIELD_MAX_CONCURRENCY
 
 type JobUpdateCallback = (job: HiggsfieldGenerationJob) => void
 
@@ -95,6 +97,10 @@ export async function resolveReferenceUrl(
 
 export function listJobs(): HiggsfieldGenerationJob[] {
   return Array.from(jobs.values()).sort((a, b) => b.createdAt - a.createdAt)
+}
+
+export function getJob(jobId: string): HiggsfieldGenerationJob | undefined {
+  return jobs.get(jobId)
 }
 
 export function cancelJob(jobId: string): boolean {
