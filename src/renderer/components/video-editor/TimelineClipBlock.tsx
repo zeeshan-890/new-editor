@@ -1,7 +1,8 @@
-import { useEffect } from 'react'
+import { memo, useEffect, useState } from 'react'
 import { cn } from '@renderer/lib/utils'
 import type { MediaAsset, TimelineClip, TimelineLayer } from '@shared/types'
 import { useVideoEditorStore, EMPTY_SILENCE_REGIONS } from '@renderer/stores/videoEditorStore'
+import { usePlaybackStore } from '@renderer/stores/playbackStore'
 import { ClipWaveform } from './ClipWaveform'
 import { ClipFilmstrip } from './ClipFilmstrip'
 
@@ -44,6 +45,8 @@ export function TimelineClipBlock({
   onTrimIn,
   onTrimOut
 }: TimelineClipBlockProps): React.JSX.Element {
+  const [hovered, setHovered] = useState(false)
+  const timelineTool = usePlaybackStore((s) => s.timelineTool)
   const waveform = useVideoEditorStore((s) => s.waveformCache[asset.id])
   const waveformLoading = useVideoEditorStore((s) => s.waveformLoading[asset.id])
   const loadWaveformForAsset = useVideoEditorStore((s) => s.loadWaveformForAsset)
@@ -74,14 +77,20 @@ export function TimelineClipBlock({
   return (
     <div
       className={cn(
-        'absolute top-1 bottom-1 rounded border overflow-hidden',
-        layer.locked ? 'cursor-not-allowed opacity-70' : 'cursor-grab active:cursor-grabbing',
+        'absolute top-1 bottom-1 rounded border overflow-hidden group',
+        layer.locked
+          ? 'cursor-not-allowed opacity-70'
+          : timelineTool === 'split'
+            ? 'cursor-col-resize'
+            : 'cursor-grab active:cursor-grabbing',
         selected ? 'border-primary ring-1 ring-primary' : style.clip,
         showWaveform && waveform && 'bg-emerald-950/40',
         showFilmstrip && filmstrip && 'bg-sky-950/40',
         className
       )}
       style={{ left, width }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       onMouseDown={onMouseDown}
       title={asset.name}
     >
@@ -91,6 +100,7 @@ export function TimelineClipBlock({
           sourceInMs={clip.sourceInMs}
           sourceOutMs={clip.sourceOutMs}
           height={CLIP_INNER_H}
+          clipWidth={width}
         />
       )}
 
@@ -120,20 +130,44 @@ export function TimelineClipBlock({
         </span>
       )}
 
-      {selected && !layer.locked && (
+      {(selected || hovered) && !layer.locked && (
         <>
           <div
-            className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize bg-primary/60 z-20"
-            onMouseDown={onTrimIn}
+            className="absolute left-0 top-0 bottom-0 w-2.5 cursor-ew-resize bg-primary/70 hover:bg-primary z-20"
+            onMouseDown={(e) => {
+              e.stopPropagation()
+              onTrimIn(e)
+            }}
           />
           <div
-            className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize bg-primary/60 z-20"
-            onMouseDown={onTrimOut}
+            className="absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize bg-primary/70 hover:bg-primary z-20"
+            onMouseDown={(e) => {
+              e.stopPropagation()
+              onTrimOut(e)
+            }}
           />
         </>
       )}
     </div>
   )
 }
+
+function areEqualTimelineClipBlockProps(
+  prev: TimelineClipBlockProps,
+  next: TimelineClipBlockProps
+): boolean {
+  return (
+    prev.clip === next.clip &&
+    prev.asset === next.asset &&
+    prev.layer === next.layer &&
+    prev.left === next.left &&
+    prev.width === next.width &&
+    prev.selected === next.selected &&
+    prev.style === next.style &&
+    prev.className === next.className
+  )
+}
+
+export const MemoTimelineClipBlock = memo(TimelineClipBlock, areEqualTimelineClipBlockProps)
 
 export { CLIP_INNER_H }
