@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { FolderOpen, Scissors, Trash2 } from 'lucide-react'
 import { Button } from '../common/Button'
 import { useProjectTabStore } from '@renderer/stores/projectTabStore'
+import { shortProjectId } from '@shared/types'
 
 export function ProjectsPage(): React.JSX.Element {
   const projectList = useProjectTabStore((s) => s.projectList)
@@ -15,7 +16,12 @@ export function ProjectsPage(): React.JSX.Element {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return projectList
-    return projectList.filter((p) => p.name.toLowerCase().includes(q))
+    return projectList.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        p.id.toLowerCase().includes(q) ||
+        shortProjectId(p.id).toLowerCase().includes(q)
+    )
   }, [projectList, query])
 
   return (
@@ -40,8 +46,14 @@ export function ProjectsPage(): React.JSX.Element {
             <div key={project.id} className="rounded-md border border-border bg-card p-3 space-y-3">
               <div>
                 <p className="text-sm font-medium truncate">{project.name}</p>
+                <p className="text-[10px] text-muted font-mono truncate" title={project.id}>
+                  ID {shortProjectId(project.id)}
+                </p>
                 <p className="text-xs text-muted">
-                  {project.generationCount} items · {new Date(project.updatedAt).toLocaleString()}
+                  Created {new Date(project.createdAt).toLocaleString()}
+                </p>
+                <p className="text-xs text-muted">
+                  {project.generationCount} items · updated {new Date(project.updatedAt).toLocaleString()}
                 </p>
               </div>
               <div className="flex gap-2">
