@@ -2,6 +2,7 @@ import { Play, Pause, Square, SkipBack, SkipForward, ZoomIn, ZoomOut } from 'luc
 import { Button } from '../common/Button'
 import { Switch } from '../common/Switch'
 import { formatTime } from '@renderer/lib/utils'
+import { usePlayheadStore } from '@renderer/stores/playheadStore'
 import { usePlaybackStore } from '@renderer/stores/playbackStore'
 import { useEditorStore } from '@renderer/stores/editorStore'
 
@@ -16,14 +17,14 @@ export function TransportBar({ onPlayPause, onStop }: TransportBarProps): React.
   const previewNonSilence = useEditorStore((s) => s.previewNonSilence)
   const setPreviewNonSilence = useEditorStore((s) => s.setPreviewNonSilence)
 
-  const playheadMs = usePlaybackStore((s) => s.playheadMs)
-  const isPlaying = usePlaybackStore((s) => s.isPlaying)
+  const playheadMs = usePlayheadStore((s) => s.playheadMs)
+  const isPlaying = usePlayheadStore((s) => s.isPlaying)
   const loopSelection = usePlaybackStore((s) => s.loopSelection)
   const setLoopSelection = usePlaybackStore((s) => s.setLoopSelection)
   const zoom = usePlaybackStore((s) => s.zoom)
   const zoomIn = usePlaybackStore((s) => s.zoomIn)
   const zoomOut = usePlaybackStore((s) => s.zoomOut)
-  const setPlayheadMs = usePlaybackStore((s) => s.setPlayheadMs)
+  const setPlayheadMs = usePlayheadStore((s) => s.setPlayheadMs)
 
   const activeRegions = regions.filter((r) => !r.removed)
 
