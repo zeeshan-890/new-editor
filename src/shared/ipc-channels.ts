@@ -51,7 +51,25 @@ export const IPC = {
   VIDEO_FILMSTRIP: 'video:filmstrip',
   VIDEO_EXPORT: 'video:export',
   VIDEO_EDITOR_PROJECT_SAVE: 'video-editor:project-save',
-  MEDIA_SAVE_AS: 'media:save-as'
+  MEDIA_SAVE_AS: 'media:save-as',
+  LLM_SETTINGS_GET: 'llm:settings-get',
+  LLM_SETTINGS_SAVE: 'llm:settings-save',
+  LLM_ANALYZE_SCRIPT: 'llm:analyze-script',
+  PIPELINE_START: 'pipeline:start',
+  PIPELINE_START_IMAGES: 'pipeline:start-images',
+  PIPELINE_START_VIDEOS: 'pipeline:start-videos',
+  PIPELINE_PAUSE: 'pipeline:pause',
+  PIPELINE_RESUME: 'pipeline:resume',
+  PIPELINE_RETRY_SEGMENT: 'pipeline:retry-segment',
+  PIPELINE_GET_STATE: 'pipeline:get-state',
+  PIPELINE_MARK_TIMELINE: 'pipeline:mark-timeline',
+  PIPELINE_UPDATED: 'pipeline:updated',
+  PIPELINE_LOG: 'pipeline:log',
+  BATCH_ALIGN_SCRIPT_AUDIO: 'alignment:batch-script-audio',
+  PROJECT_APPLY_PIPELINE_ANALYSIS: 'project:apply-pipeline-analysis',
+  PROJECT_UPDATE_PIPELINE: 'project:update-pipeline',
+  PROJECT_SYNC_PIPELINE_TIMELINE_AUDIO: 'project:sync-pipeline-timeline-audio',
+  PROJECT_MATCH_PIPELINE_SEGMENT_TIMINGS: 'project:match-pipeline-segment-timings'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
