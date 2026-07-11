@@ -6,13 +6,15 @@ interface ClipFilmstripProps {
   sourceInMs: number
   sourceOutMs: number
   height: number
+  clipWidth: number
 }
 
 export function ClipFilmstrip({
   filmstrip,
   sourceInMs,
   sourceOutMs,
-  height
+  height,
+  clipWidth
 }: ClipFilmstripProps): React.JSX.Element {
   const { frames, intervalMs } = filmstrip
 
@@ -35,6 +37,17 @@ export function ClipFilmstrip({
   if (visible.length === 0) {
     const fallback = frames[Math.min(startIdx, frames.length - 1)]
     visible = fallback ? [fallback] : []
+  }
+
+  const maxFramesByWidth = Math.max(1, Math.ceil(clipWidth / 24))
+  if (visible.length > maxFramesByWidth) {
+    const sampled: string[] = []
+    for (let i = 0; i < maxFramesByWidth; i++) {
+      const idx = Math.floor((i * (visible.length - 1)) / Math.max(1, maxFramesByWidth - 1))
+      const frame = visible[idx]
+      if (frame) sampled.push(frame)
+    }
+    visible = sampled
   }
 
   return (
