@@ -1,4 +1,5 @@
 import { useCallback, useRef } from 'react'
+import { usePlayheadStore } from '../stores/playheadStore'
 import { usePlaybackStore } from '../stores/playbackStore'
 import { useEditorStore } from '../stores/editorStore'
 import { clamp } from '../lib/utils'
@@ -20,7 +21,7 @@ export function useTimelineInteraction(containerWidth: number): {
   const scrollMs = usePlaybackStore((s) => s.scrollMs)
   const setScrollMs = usePlaybackStore((s) => s.setScrollMs)
   const setZoom = usePlaybackStore((s) => s.setZoom)
-  const setPlayheadMs = usePlaybackStore((s) => s.setPlayheadMs)
+  const setPlayheadMs = usePlayheadStore((s) => s.setPlayheadMs)
 
   const dragRef = useRef<{ startX: number; startScroll: number } | null>(null)
   const selectRef = useRef<{ startMs: number } | null>(null)
