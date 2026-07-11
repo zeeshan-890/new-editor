@@ -18,9 +18,11 @@ import {
   generateId,
   generationToModeDraft,
   clampVideoDurationSeconds,
-  normalizeGenerationProject,
   normalizeTabComposerState
 } from '@shared/types'
+import { normalizeLoadedGenerationProject, normalizePipelineState } from '@shared/segmentPipeline'
+import { findPipelineSegmentForGeneration } from '@shared/pipelineImageRefs'
+import type { SegmentPipelineState } from '@shared/segmentPipeline'
 import { isLegacyDefaultImageModel, shouldUseDefaultImageModel } from '@shared/imageModels'
 
 const saveTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -106,11 +108,39 @@ export const useProjectTabStore = create<{
   flushProjectSaves: () => Promise<void>
   deleteProjectAndCloseTabs: (projectId: string) => Promise<boolean>
   updateProject: (projectId: string, patch: Partial<GenerationProject>) => void
+  mergeProject: (project: GenerationProject) => void
+  updateProjectPipelineState: (projectId: string, pipeline: SegmentPipelineState) => void
+  saveProjectNow: (projectId: string) => Promise<void>
   updateTabDraft: (tabId: string, patch: Partial<TabComposerState>) => void
   updateModeDraft: (tabId: string, mode: GenerationMode, patch: Partial<GenerationModeDraft>) => void
   appendImageAttachment: (tabId: string, media: ProjectMedia) => void
   setTabMode: (tabId: string, mode: GenerationMode) => void
   loadGenerationIntoTab: (tabId: string, projectId: string, generation: ProjectGeneration) => Promise<void>
+  applyRegeneratedSegmentImage: (
+    projectId: string,
+    payload: {
+      segmentId: string
+      replacesGenerationId?: string
+      generation: ProjectGeneration
+      imagePrompt: string
+      imageAttachments?: ProjectGeneration['imageAttachments']
+      context?: string
+      useContextInPrompt?: boolean
+      aspectRatio?: string
+    }
+  ) => void
+  stagePendingSegmentImage: (
+    projectId: string,
+    payload: {
+      segmentId: string
+      generation: ProjectGeneration
+      imagePrompt: string
+      config?: GenerationComposerSnapshot
+      replacesGenerationId?: string
+    }
+  ) => void
+  approveSegmentImage: (projectId: string, segmentId: string) => void
+  discardPendingSegmentImage: (projectId: string, segmentId: string) => void
   addProjectGeneration: (projectId: string, generation: ProjectGeneration) => void
   linkEditorAudioToProject: (
     projectId: string,
@@ -163,7 +193,7 @@ export const useProjectTabStore = create<{
       for (const tab of tabs) {
         if (tab.projectId) {
           const loaded = await window.electronAPI.loadProject(tab.projectId)
-          if (loaded) projects[tab.projectId] = normalizeGenerationProject(loaded)
+          if (loaded) projects[tab.projectId] = normalizeLoadedGenerationProject(loaded)
           else tabs = tabs.filter((t) => t.id !== tab.id)
         }
       }
@@ -213,7 +243,7 @@ export const useProjectTabStore = create<{
         }
         tabs = [tab]
         activeTabId = tab.id
-        projects[project.id] = normalizeGenerationProject(project)
+        projects[project.id] = normalizeLoadedGenerationProject(project)
         tabDrafts[tab.id] = normalizeTabComposerState(projects[project.id].composer)
       }
 
@@ -268,7 +298,7 @@ export const useProjectTabStore = create<{
 
   openNewProjectTab: async () => {
     if (!window.electronAPI) return
-    const project = normalizeGenerationProject(await window.electronAPI.createProject())
+    const project = normalizeLoadedGenerationProject(await window.electronAPI.createProject())
     const tab: AppTab = {
       id: generateId(),
       kind: 'generation',
@@ -291,12 +321,9 @@ export const useProjectTabStore = create<{
   openExistingProjectTab: async (projectId) => {
     if (!window.electronAPI) return
 
-    let project = get().projects[projectId]
-    if (!project) {
-      const loaded = await window.electronAPI.loadProject(projectId)
-      if (!loaded) return
-      project = normalizeGenerationProject(loaded)
-    }
+    const loaded = await window.electronAPI.loadProject(projectId)
+    if (!loaded) return
+    const project = normalizeLoadedGenerationProject(loaded)
 
     const tab: AppTab = {
       id: generateId(),
@@ -324,7 +351,7 @@ export const useProjectTabStore = create<{
       project = get().projects[projectId]
       if (!project && window.electronAPI) {
         const loaded = await window.electronAPI.loadProject(projectId)
-        if (loaded) project = normalizeGenerationProject(loaded)
+        if (loaded) project = normalizeLoadedGenerationProject(loaded)
       }
       if (project) title = `${project.name} · Editor`
     }
@@ -341,7 +368,7 @@ export const useProjectTabStore = create<{
       newTabMenuOpen: false,
       projectsPageOpen: false,
       projects: project
-        ? { ...state.projects, [project.id]: normalizeGenerationProject(project) }
+        ? { ...state.projects, [project.id]: normalizeLoadedGenerationProject(project) }
         : state.projects
     }))
     scheduleSessionSave(get, get().tabs, tab.id, get().tabDrafts)
@@ -422,7 +449,7 @@ export const useProjectTabStore = create<{
       return { tabs, tabDrafts, projects, activeTabId }
     })
     if (needsFallbackProject) {
-      const fallback = normalizeGenerationProject(await window.electronAPI.createProject())
+      const fallback = normalizeLoadedGenerationProject(await window.electronAPI.createProject())
       const fallbackTab: AppTab = {
         id: generateId(),
         kind: 'generation',
@@ -450,6 +477,7 @@ export const useProjectTabStore = create<{
         ...current,
         ...patch,
         composer: patch.composer ? normalizeTabComposerState(patch.composer) : current.composer,
+        pipeline: patch.pipeline ? normalizePipelineState(patch.pipeline) : current.pipeline,
         updatedAt: Date.now()
       }
       const tabs = state.tabs.map((tab) =>
@@ -458,6 +486,50 @@ export const useProjectTabStore = create<{
       scheduleProjectSave(projectId, get)
       return {
         projects: { ...state.projects, [projectId]: updated },
+        tabs
+      }
+    })
+  },
+
+  updateProjectPipelineState: (projectId, pipeline) => {
+    const normalized = normalizePipelineState(pipeline)
+    set((state) => {
+      const current = state.projects[projectId]
+      if (!current) return state
+      scheduleProjectSave(projectId, get)
+      return {
+        projects: {
+          ...state.projects,
+          [projectId]: { ...current, pipeline: normalized, updatedAt: Date.now() }
+        }
+      }
+    })
+  },
+
+  saveProjectNow: async (projectId) => {
+    const timer = saveTimers.get(projectId)
+    if (timer) {
+      clearTimeout(timer)
+      saveTimers.delete(projectId)
+    }
+    const project = get().projects[projectId]
+    if (!project || !window.electronAPI?.saveProject) return
+    const saved = await window.electronAPI.saveProject(project)
+    const normalized = normalizeLoadedGenerationProject(saved)
+    set((state) => ({
+      projects: { ...state.projects, [projectId]: normalized }
+    }))
+  },
+
+  mergeProject: (project) => {
+    const normalized = normalizeLoadedGenerationProject(project)
+    set((state) => {
+      const tabs = state.tabs.map((tab) =>
+        tab.projectId === normalized.id ? { ...tab, title: normalized.name } : tab
+      )
+      scheduleProjectSave(normalized.id, get)
+      return {
+        projects: { ...state.projects, [normalized.id]: normalized },
         tabs
       }
     })
@@ -548,12 +620,36 @@ export const useProjectTabStore = create<{
         // fall back to stored draft fields
       }
     }
+
+    const project = get().projects[projectId]
+    const pipeline = project?.pipeline ? normalizePipelineState(project.pipeline) : undefined
+    const segment =
+      pipeline && generation.type === 'image'
+        ? findPipelineSegmentForGeneration(pipeline, generation)
+        : undefined
+
+    let regenerateSegmentId: string | null = null
+    if (segment) {
+      regenerateSegmentId = segment.id
+      if (segment.imagePrompt.trim()) {
+        modeDraft = { ...modeDraft, prompt: segment.imagePrompt }
+      }
+      if (pipeline?.styleLock?.visualStyle && !modeDraft.context.trim()) {
+        modeDraft = { ...modeDraft, context: pipeline.styleLock.visualStyle }
+      }
+      modeDraft = {
+        ...modeDraft,
+        aspectRatio: pipeline?.styleLock?.aspectRatio ?? modeDraft.aspectRatio
+      }
+    }
+
     set((state) => {
       const current = state.tabDrafts[tabId] ?? createEmptyTabComposerState()
       const nextDraft = normalizeTabComposerState({
         ...current,
         activeMode: generation.type,
         selectedGenerationId: generation.id,
+        regenerateSegmentId,
         [generation.type]: modeDraft
       })
       const tabDrafts = {
@@ -570,6 +666,215 @@ export const useProjectTabStore = create<{
       if (project) scheduleProjectSave(projectId, get)
       scheduleSessionSave(get, state.tabs, state.activeTabId, tabDrafts)
       return { tabDrafts, projects }
+    })
+  },
+
+  applyRegeneratedSegmentImage: (projectId, payload) => {
+    set((state) => {
+      const project = state.projects[projectId]
+      if (!project?.pipeline) return state
+
+      const pipeline = normalizePipelineState(project.pipeline)
+      const segmentIdx = pipeline.segments.findIndex((s) => s.id === payload.segmentId)
+      if (segmentIdx < 0) return state
+
+      const segment = pipeline.segments[segmentIdx]
+      const removeIds = new Set(
+        [payload.replacesGenerationId, segment.imageJobId, payload.generation.id].filter(Boolean)
+      )
+
+      const galleryPrompt = `Segment ${segment.index + 1}: ${segment.scriptText}`
+      const generation: ProjectGeneration = {
+        ...payload.generation,
+        prompt: galleryPrompt,
+        context: payload.context ?? payload.generation.context,
+        useContextInPrompt:
+          payload.useContextInPrompt ?? payload.generation.useContextInPrompt ?? true,
+        imageAttachments: payload.imageAttachments
+          ? payload.imageAttachments.map((m) => ({ ...m }))
+          : payload.generation.imageAttachments,
+        aspectRatio: payload.aspectRatio ?? payload.generation.aspectRatio
+      }
+
+      const segments = pipeline.segments.map((s, idx) =>
+        idx === segmentIdx
+          ? {
+              ...s,
+              imagePrompt: payload.imagePrompt,
+              imageJobId: payload.generation.id,
+              imageLocalPath: payload.generation.localPath,
+              status: 'image_done' as const,
+              pendingImageApproval: undefined,
+              videoJobId: undefined,
+              videoLocalPath: undefined,
+              timelineClipId: undefined,
+              error: undefined
+            }
+          : s
+      )
+
+      const generations = [
+        generation,
+        ...project.generations.filter((item) => !removeIds.has(item.id))
+      ]
+
+      const tabDrafts = { ...state.tabDrafts }
+      for (const tab of state.tabs) {
+        if (tab.kind !== 'generation' || tab.projectId !== projectId) continue
+        const draft = tabDrafts[tab.id]
+        if (!draft) continue
+        tabDrafts[tab.id] = normalizeTabComposerState({
+          ...draft,
+          selectedGenerationId: generation.id,
+          regenerateSegmentId: payload.segmentId,
+          image: {
+            ...draft.image,
+            prompt: payload.imagePrompt,
+            context: payload.context ?? draft.image.context,
+            useContextInPrompt:
+              payload.useContextInPrompt ?? draft.image.useContextInPrompt,
+            imageAttachments: generation.imageAttachments
+              ? generation.imageAttachments.map((m) => ({ ...m }))
+              : draft.image.imageAttachments,
+            aspectRatio: payload.aspectRatio ?? draft.image.aspectRatio
+          }
+        })
+      }
+
+      const nextProject = {
+        ...project,
+        generations,
+        pipeline: { ...pipeline, segments },
+        composer: tabDrafts[state.tabs.find((t) => t.id === state.activeTabId)?.id ?? ''] ?? project.composer,
+        updatedAt: Date.now()
+      }
+
+      scheduleProjectSave(projectId, get)
+      scheduleSessionSave(get, state.tabs, state.activeTabId, tabDrafts)
+
+      return {
+        projects: { ...state.projects, [projectId]: nextProject },
+        tabDrafts
+      }
+    })
+    void get().refreshProjectList()
+  },
+
+  stagePendingSegmentImage: (projectId, payload) => {
+    set((state) => {
+      const project = state.projects[projectId]
+      if (!project?.pipeline) return state
+
+      const pipeline = normalizePipelineState(project.pipeline)
+      const segmentIdx = pipeline.segments.findIndex((s) => s.id === payload.segmentId)
+      if (segmentIdx < 0) return state
+
+      const config = payload.config
+      const pending = {
+        jobId: payload.generation.id,
+        url: payload.generation.url,
+        localPath: payload.generation.localPath,
+        imagePrompt: payload.imagePrompt,
+        model: payload.generation.model,
+        context: config?.context ?? payload.generation.context ?? '',
+        useContextInPrompt: config?.useContextInPrompt ?? true,
+        imageAttachments: config?.imageAttachments
+          ? config.imageAttachments.map((m) => ({ ...m }))
+          : payload.generation.imageAttachments?.map((m) => ({ ...m })) ?? [],
+        aspectRatio: config?.aspectRatio ?? payload.generation.aspectRatio,
+        replacesGenerationId: payload.replacesGenerationId,
+        createdAt: payload.generation.createdAt
+      }
+
+      const segment = pipeline.segments[segmentIdx]
+      const approvedImageJobId =
+        segment.imageJobId === payload.generation.id
+          ? payload.replacesGenerationId ?? segment.imageJobId
+          : segment.imageJobId
+
+      const segments = pipeline.segments.map((s, idx) =>
+        idx === segmentIdx
+          ? {
+              ...s,
+              imageJobId: approvedImageJobId,
+              status: 'image_pending_approval' as const,
+              pendingImageApproval: pending
+            }
+          : s
+      )
+
+      const nextProject = {
+        ...project,
+        pipeline: { ...pipeline, segments },
+        updatedAt: Date.now()
+      }
+
+      scheduleProjectSave(projectId, get)
+      return { projects: { ...state.projects, [projectId]: nextProject } }
+    })
+  },
+
+  approveSegmentImage: (projectId, segmentId) => {
+    const project = get().projects[projectId]
+    if (!project?.pipeline) return
+
+    const pipeline = normalizePipelineState(project.pipeline)
+    const segment = pipeline.segments.find((s) => s.id === segmentId)
+    const pending = segment?.pendingImageApproval
+    if (!segment || !pending) return
+
+    const generation: ProjectGeneration = {
+      id: pending.jobId,
+      type: 'image',
+      prompt: `Segment ${segment.index + 1}: ${segment.scriptText}`,
+      model: pending.model,
+      url: pending.url,
+      localPath: pending.localPath,
+      createdAt: pending.createdAt,
+      context: pending.context,
+      useContextInPrompt: pending.useContextInPrompt,
+      imageAttachments: pending.imageAttachments.map((m) => ({ ...m })),
+      aspectRatio: pending.aspectRatio
+    }
+
+    get().applyRegeneratedSegmentImage(projectId, {
+      segmentId,
+      replacesGenerationId: pending.replacesGenerationId,
+      generation,
+      imagePrompt: pending.imagePrompt,
+      imageAttachments: pending.imageAttachments,
+      context: pending.context,
+      useContextInPrompt: pending.useContextInPrompt,
+      aspectRatio: pending.aspectRatio
+    })
+  },
+
+  discardPendingSegmentImage: (projectId, segmentId) => {
+    set((state) => {
+      const project = state.projects[projectId]
+      if (!project?.pipeline) return state
+
+      const pipeline = normalizePipelineState(project.pipeline)
+      const segments = pipeline.segments.map((s) => {
+        if (s.id !== segmentId) return s
+        const restoredJobId =
+          s.pendingImageApproval?.replacesGenerationId ?? s.imageJobId
+        return {
+          ...s,
+          status: s.imageLocalPath ? ('image_done' as const) : ('pending' as const),
+          pendingImageApproval: undefined,
+          imageJobId: s.imageLocalPath ? restoredJobId : s.imageJobId
+        }
+      })
+
+      const nextProject = {
+        ...project,
+        pipeline: { ...pipeline, segments },
+        updatedAt: Date.now()
+      }
+
+      scheduleProjectSave(projectId, get)
+      return { projects: { ...state.projects, [projectId]: nextProject } }
     })
   },
 
@@ -687,18 +992,84 @@ export const useProjectTabStore = create<{
         linkedClipSourceOutMs: config?.linkedClipSourceOutMs ?? undefined,
         autoExtraDurationSeconds: config?.autoExtraDurationSeconds
       }
-      get().addProjectGeneration(projectId, generation)
+
+      const finishGeneration = (localPath?: string): void => {
+        const resolved = localPath ? { ...generation, localPath } : generation
+        if (config?.regenerateSegmentId && type === 'image') {
+          get().stagePendingSegmentImage(projectId, {
+            segmentId: config.regenerateSegmentId,
+            generation: resolved,
+            imagePrompt: config.prompt,
+            config,
+            replacesGenerationId: config.replacesGenerationId ?? undefined
+          })
+          return
+        }
+        get().addProjectGeneration(projectId, resolved)
+      }
+
       if (window.electronAPI?.ensureGenerationMedia) {
         void window.electronAPI
           .ensureGenerationMedia(projectId, generation)
           .then(({ localPath }) => {
-            get().updateProjectGenerationLocalPath(projectId, generation.id, localPath)
+            if (!config?.regenerateSegmentId) {
+              get().updateProjectGenerationLocalPath(projectId, generation.id, localPath)
+            }
+            finishGeneration(localPath)
           })
-          .catch(() => {})
+          .catch(() => finishGeneration())
+      } else {
+        finishGeneration()
       }
     }
 
     if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+      const config = get().pendingJobConfigs[job.id]
+      if (
+        (job.status === 'failed' || job.status === 'cancelled') &&
+        config?.regenerateSegmentId
+      ) {
+        const project = get().projects[projectId]
+        if (project?.pipeline) {
+          const pipeline = normalizePipelineState(project.pipeline)
+          const segmentId = config.regenerateSegmentId
+          get().updateProjectPipelineState(projectId, {
+            ...pipeline,
+            segments: pipeline.segments.map((segment) => {
+              if (segment.id !== segmentId) return segment
+              if (segment.status !== 'image_running' && segment.status !== 'video_running') {
+                return segment
+              }
+              if (segment.status === 'video_running') {
+                return {
+                  ...segment,
+                  status: segment.videoLocalPath
+                    ? ('video_done' as const)
+                    : segment.imageLocalPath
+                      ? ('image_done' as const)
+                      : ('failed' as const),
+                  error:
+                    segment.videoLocalPath || segment.imageLocalPath
+                      ? undefined
+                      : job.status === 'cancelled'
+                        ? 'Generation was cancelled'
+                        : 'Generation failed'
+                }
+              }
+              return {
+                ...segment,
+                status: segment.imageLocalPath ? ('image_done' as const) : ('failed' as const),
+                error: segment.imageLocalPath
+                  ? undefined
+                  : job.status === 'cancelled'
+                    ? 'Generation was cancelled'
+                    : 'Generation failed'
+              }
+            })
+          })
+        }
+      }
+
       set((state) => {
         const nextProjects = { ...state.pendingJobProjects }
         const nextConfigs = { ...state.pendingJobConfigs }
