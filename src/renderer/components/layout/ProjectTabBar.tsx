@@ -1,7 +1,9 @@
-import { Plus, X, Scissors, FolderOpen, Sparkles, Library } from 'lucide-react'
+import { Plus, X, Scissors, FolderOpen, Sparkles, Library, Loader2 } from 'lucide-react'
 import { cn } from '@renderer/lib/utils'
 import { useProjectTabStore } from '@renderer/stores/projectTabStore'
+import { useHiggsfieldStore } from '@renderer/stores/higgsfieldStore'
 import type { AppTabKind } from '@shared/types'
+import { shortProjectId } from '@shared/types'
 
 function tabIcon(kind: AppTabKind): React.JSX.Element {
   if (kind === 'editor') return <Scissors size={12} className="shrink-0" />
@@ -21,10 +23,25 @@ export function ProjectTabBar(): React.JSX.Element {
   const openEditorTab = useProjectTabStore((s) => s.openEditorTab)
   const openProjectEditorTab = useProjectTabStore((s) => s.openProjectEditorTab)
   const openProjectsPage = useProjectTabStore((s) => s.openProjectsPage)
+  const pendingJobProjects = useProjectTabStore((s) => s.pendingJobProjects)
+  const projects = useProjectTabStore((s) => s.projects)
+  const jobs = useHiggsfieldStore((s) => s.jobs)
+
+  const tabHasBackgroundWork = (projectId: string): boolean => {
+    const hasActiveJobs = jobs.some(
+      (job) =>
+        pendingJobProjects[job.id] === projectId &&
+        (job.status === 'queued' || job.status === 'running')
+    )
+    return hasActiveJobs || projects[projectId]?.pipeline?.pipelineStatus === 'running'
+  }
 
   return (
     <div className="relative flex items-end gap-0.5 px-2 pt-2 pb-0 bg-card border-b border-border shrink-0 min-h-[40px]">
-      {tabs.map((tab) => (
+      {tabs.map((tab) => {
+        const backgroundWork = tab.projectId != null && tabHasBackgroundWork(tab.projectId)
+
+        return (
         <div
           key={tab.id}
           className={cn(
@@ -37,6 +54,9 @@ export function ProjectTabBar(): React.JSX.Element {
         >
           {tabIcon(tab.kind)}
           <span className="truncate">{tab.title}</span>
+          {backgroundWork && (
+            <Loader2 size={10} className="shrink-0 animate-spin text-primary" aria-label="Generating in background" />
+          )}
           {tabs.length > 1 && (
             <button
               type="button"
@@ -51,7 +71,8 @@ export function ProjectTabBar(): React.JSX.Element {
             </button>
           )}
         </div>
-      ))}
+        )
+      })}
 
       <button
         type="button"
@@ -106,8 +127,10 @@ export function ProjectTabBar(): React.JSX.Element {
                         onClick={() => void openExistingProjectTab(project.id)}
                       >
                         <span className="font-medium">{project.name}</span>
-                        <span className="text-muted ml-1">
-                          · {project.generationCount} items · {project.mode}
+                        <span className="text-muted ml-1 font-mono">· {shortProjectId(project.id)}</span>
+                        <span className="block text-muted">
+                          {new Date(project.createdAt).toLocaleDateString()} · {project.generationCount} items ·{' '}
+                          {project.mode}
                         </span>
                       </button>
                       <button
