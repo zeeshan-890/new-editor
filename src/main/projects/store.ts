@@ -41,6 +41,7 @@ export async function listProjectSummaries(): Promise<ProjectSummary[]> {
       summaries.push({
         id: project.id,
         name: project.name,
+        createdAt: project.createdAt ?? project.updatedAt,
         updatedAt: project.updatedAt,
         generationCount: project.generations?.length ?? 0,
         mode: project.composer?.activeMode ?? project.mode ?? 'image'
