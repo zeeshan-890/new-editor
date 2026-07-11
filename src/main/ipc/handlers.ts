@@ -52,7 +52,7 @@ import type {
 } from '../../shared/types'
 import { getLogFilePath, logError } from '../logger'
 import { probeMediaFile } from '../video/probe'
-import { exportVideoSequence } from '../video/export'
+import { exportTimelineAudioMix, exportVideoSequence } from '../video/export'
 import type { VideoExportOptions } from '../../shared/videoExport'
 import { filmstripForImage, generateVideoFilmstrip } from '../video/filmstrip'
 import { downloadMedia } from '../higgsfield/cli'
@@ -69,6 +69,29 @@ import {
 } from '../projects/store'
 import { hydrateGenerationDraft, ensureGenerationMediaInProject } from '../projects/media'
 import { alignScriptAudio } from '../alignment/whisper'
+import { batchMatchScriptAudio } from '../alignment/batchMatchScript'
+import { analyzeScript } from '../intelligence/analyzeScript'
+import { applyAnalysisToPipeline } from '../intelligence/applyAnalysis'
+import { loadLlmSettings, saveLlmSettings } from '../llm/settings'
+import {
+  getPipelineState,
+  handlePipelineJobUpdate,
+  markSegmentsTimelinePlaced,
+  pausePipeline,
+  resumePipeline,
+  retrySegment,
+  setPipelineNotifyCallback,
+  startPipelineImages,
+  startPipelineVideos
+} from '../pipeline/orchestrator'
+import { syncPipelineMasterAudioFromTimeline } from '../pipeline/timelineAudio'
+import { setPipelineLogCallback, pipelineDebugLog } from '../pipeline/debugLog'
+import {
+  normalizePipelineState,
+  createEmptyPipelineState,
+  normalizeLoadedGenerationProject
+} from '../../shared/segmentPipeline'
+import type { LlmSettings } from '../../shared/segmentPipeline'
 
 let currentPcmPath: string | null = null
 let currentMetadata: LoadedAudioProject['metadata'] | null = null
@@ -90,6 +113,17 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   setJobUpdateCallback((job) => {
     const win = getWindow()
     win?.webContents.send(IPC.HIGGSFIELD_JOB_UPDATED, job)
+    void handlePipelineJobUpdate(job)
+  })
+
+  setPipelineNotifyCallback((projectId, pipeline) => {
+    const win = getWindow()
+    win?.webContents.send(IPC.PIPELINE_UPDATED, { projectId, pipeline })
+  })
+
+  setPipelineLogCallback((event) => {
+    const win = getWindow()
+    win?.webContents.send(IPC.PIPELINE_LOG, event)
   })
 
   ipcMain.handle(IPC.OPEN_FILE, async () => {
@@ -160,7 +194,13 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
 
   ipcMain.handle(IPC.PROJECT_LIST, async () => listProjectSummaries())
 
-  ipcMain.handle(IPC.PROJECT_LOAD, async (_e, projectId: string) => loadProject(projectId))
+  ipcMain.handle(IPC.PROJECT_LOAD, async (_e, projectId: string) => {
+    const project = await loadProject(projectId)
+    if (!project?.pipeline) return project
+    const pipeline = await getPipelineState(projectId)
+    if (!pipeline) return project
+    return { ...project, pipeline }
+  })
 
   ipcMain.handle(IPC.PROJECT_SAVE, async (_e, project: GenerationProject) => saveProject(project))
 
@@ -196,6 +236,252 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       _e,
       payload: { audioPath: string; script: string; trimStartMs?: number; trimEndMs?: number }
     ) => alignScriptAudio(payload.audioPath, payload.script, payload.trimStartMs, payload.trimEndMs)
+  )
+
+  ipcMain.handle(IPC.BATCH_ALIGN_SCRIPT_AUDIO, async (_e, payload) =>
+    batchMatchScriptAudio(payload)
+  )
+
+  ipcMain.handle(IPC.LLM_SETTINGS_GET, async () => loadLlmSettings())
+
+  ipcMain.handle(IPC.LLM_SETTINGS_SAVE, async (_e, settings: LlmSettings) =>
+    saveLlmSettings(settings)
+  )
+
+  ipcMain.handle(IPC.LLM_ANALYZE_SCRIPT, async (_e, input: string | import('../../shared/segmentPipeline').AnalyzeScriptInput) =>
+    analyzeScript(input)
+  )
+
+  ipcMain.handle(IPC.PIPELINE_GET_STATE, async (_e, projectId: string) =>
+    getPipelineState(projectId)
+  )
+
+  ipcMain.handle(
+    IPC.PIPELINE_START,
+    async (
+      _e,
+      payload:
+        | string
+        | {
+            projectId: string
+            videoEditor?: VideoEditorProject
+            pipeline?: import('../../shared/segmentPipeline').SegmentPipelineState
+          }
+    ) => {
+      const projectId = typeof payload === 'string' ? payload : payload.projectId
+      const videoEditor = typeof payload === 'string' ? undefined : payload.videoEditor
+      const pipeline = typeof payload === 'string' ? undefined : payload.pipeline
+      return startPipelineImages(projectId, videoEditor, pipeline)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.PIPELINE_START_IMAGES,
+    async (
+      _e,
+      payload: {
+        projectId: string
+        videoEditor?: VideoEditorProject
+        pipeline?: import('../../shared/segmentPipeline').SegmentPipelineState
+      }
+    ) => startPipelineImages(payload.projectId, payload.videoEditor, payload.pipeline)
+  )
+
+  ipcMain.handle(
+    IPC.PIPELINE_START_VIDEOS,
+    async (
+      _e,
+      payload: {
+        projectId: string
+        videoEditor?: VideoEditorProject
+        pipeline?: import('../../shared/segmentPipeline').SegmentPipelineState
+      }
+    ) => startPipelineVideos(payload.projectId, payload.videoEditor, payload.pipeline)
+  )
+
+  ipcMain.handle(IPC.PIPELINE_PAUSE, async (_e, projectId: string) => pausePipeline(projectId))
+
+  ipcMain.handle(
+    IPC.PIPELINE_RESUME,
+    async (
+      _e,
+      payload:
+        | string
+        | {
+            projectId: string
+            videoEditor?: VideoEditorProject
+            pipeline?: import('../../shared/segmentPipeline').SegmentPipelineState
+          }
+    ) => {
+      const projectId = typeof payload === 'string' ? payload : payload.projectId
+      const videoEditor = typeof payload === 'string' ? undefined : payload.videoEditor
+      const pipeline = typeof payload === 'string' ? undefined : payload.pipeline
+      return resumePipeline(projectId, videoEditor, pipeline)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.PIPELINE_RETRY_SEGMENT,
+    async (_e, payload: { projectId: string; segmentId: string; stage: 'image' | 'video' | 'full' }) =>
+      retrySegment(payload.projectId, payload.segmentId, payload.stage)
+  )
+
+  ipcMain.handle(
+    IPC.PIPELINE_MARK_TIMELINE,
+    async (
+      _e,
+      payload: { projectId: string; placements: Array<{ segmentId: string; clipId: string }> }
+    ) => markSegmentsTimelinePlaced(payload.projectId, payload.placements)
+  )
+
+  ipcMain.handle(
+    IPC.PROJECT_APPLY_PIPELINE_ANALYSIS,
+    async (
+      _e,
+      payload: {
+        projectId: string
+        script: string
+        pipeline?: import('../../shared/segmentPipeline').SegmentPipelineState
+      }
+    ) => {
+      const loaded = await loadProject(payload.projectId)
+      if (!loaded) throw new Error('Project not found.')
+      const project = normalizeLoadedGenerationProject(loaded)
+      const script = payload.script.trim()
+      if (!script) throw new Error('Script is empty.')
+
+      const base = normalizePipelineState(
+        payload.pipeline ?? project.pipeline ?? createEmptyPipelineState()
+      )
+      const analysis = await analyzeScript({
+        script,
+        creativeInstructions: base.creativeInstructions,
+        references: (base.scriptReferences ?? []).map((ref) => ({
+          id: ref.id,
+          name: ref.name,
+          instruction: ref.instruction
+        }))
+      })
+      const pipeline = applyAnalysisToPipeline(
+        {
+          ...base,
+          fullScript: script,
+          creativeInstructions: base.creativeInstructions,
+          scriptReferences: base.scriptReferences,
+          imageModel: base.imageModel ?? project.selectedImageModel,
+          videoModel: base.videoModel ?? project.selectedVideoModel,
+          workspaceId: base.workspaceId ?? project.workspaceId
+        },
+        analysis
+      )
+      pipelineDebugLog(payload.projectId, 'step', 'analyze', 'Script analysis complete', {
+        segmentCount: pipeline.segments.length,
+        characterCount: pipeline.characters.length,
+        creativeInstructions: Boolean(pipeline.creativeInstructions?.trim()),
+        scriptReferences: pipeline.scriptReferences?.length ?? 0,
+        styleLock: pipeline.styleLock,
+        segments: pipeline.segments.map((s) => ({
+          n: s.index + 1,
+          script: s.scriptText.slice(0, 80),
+          imagePrompt: s.imagePrompt.slice(0, 120),
+          videoMotion: s.videoMotionPrompt?.slice(0, 80),
+          referenceIds: s.scriptReferenceIds,
+          characters: s.characters
+        })),
+        characters: pipeline.characters.map((c) => ({
+          name: c.name,
+          description: c.description.slice(0, 100)
+        }))
+      })
+      return saveProject({ ...project, pipeline, updatedAt: Date.now() })
+    }
+  )
+
+  ipcMain.handle(
+    IPC.PROJECT_UPDATE_PIPELINE,
+    async (_e, payload: { projectId: string; pipeline: import('../../shared/segmentPipeline').SegmentPipelineState }) => {
+      const project = await loadProject(payload.projectId)
+      if (!project) throw new Error('Project not found.')
+      return saveProject({
+        ...project,
+        pipeline: normalizePipelineState(payload.pipeline),
+        updatedAt: Date.now()
+      })
+    }
+  )
+
+  ipcMain.handle(
+    IPC.PROJECT_SYNC_PIPELINE_TIMELINE_AUDIO,
+    async (
+      _e,
+      payload: {
+        projectId: string
+        videoEditor?: VideoEditorProject
+        pipeline?: import('../../shared/segmentPipeline').SegmentPipelineState
+      }
+    ) => syncPipelineMasterAudioFromTimeline(payload.projectId, payload.videoEditor, payload.pipeline)
+  )
+
+  ipcMain.handle(
+    IPC.PROJECT_MATCH_PIPELINE_SEGMENT_TIMINGS,
+    async (
+      _e,
+      payload: {
+        projectId: string
+        pipeline?: import('../../shared/segmentPipeline').SegmentPipelineState
+      }
+    ) => {
+      const loaded = await loadProject(payload.projectId)
+      if (!loaded) throw new Error('Project not found.')
+      const project = normalizeLoadedGenerationProject(loaded)
+      const pipeline = normalizePipelineState(
+        payload.pipeline ?? project.pipeline ?? createEmptyPipelineState()
+      )
+      if (!pipeline.masterAudioPath) {
+        throw new Error('Sync timeline audio first, then get segment timings.')
+      }
+      if (pipeline.segments.length === 0) {
+        throw new Error('Analyze script first to create segments.')
+      }
+
+      const result = await batchMatchScriptAudio({
+        audioPath: pipeline.masterAudioPath,
+        fullScript: pipeline.fullScript,
+        segments: pipeline.segments.map((s) => ({
+          id: s.id,
+          scriptText: s.scriptText,
+          index: s.index
+        })),
+        audioDurationMs: pipeline.masterAudioDurationMs
+      })
+      if (result.matches.length === 0) {
+        const reason = result.warnings[0] ?? 'Could not extract segment timings from audio.'
+        throw new Error(reason)
+      }
+
+      const byId = new Map(result.matches.map((m) => [m.segmentId, m.match]))
+      const next = {
+        ...pipeline,
+        lastError: undefined,
+        segments: pipeline.segments.map((segment) => {
+          const match = byId.get(segment.id)
+          if (!match) return { ...segment, scriptMatch: null }
+          return {
+            ...segment,
+            scriptMatch: match,
+            status: segment.status === 'pending' ? 'audio_match_done' : segment.status
+          }
+        })
+      }
+
+      if (result.warnings.length > 0) {
+        pipelineDebugLog(payload.projectId, 'warn', 'audio', 'Segment timing warnings', {
+          warnings: result.warnings
+        })
+      }
+
+      return saveProject({ ...project, pipeline: next, updatedAt: Date.now() })
+    }
   )
 
   ipcMain.handle(IPC.SESSION_LOAD, async () => loadSession())
@@ -257,12 +543,37 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     async (
       _e,
       payload: {
+        mode?: 'sync-pipeline-timeline-audio' | 'timeline-audio'
+        projectId?: string
+        videoEditor?: VideoEditorProject
+        pipeline?: import('../../shared/segmentPipeline').SegmentPipelineState
         assets: MediaAsset[]
         layers: TimelineLayer[]
         outputPath: string
         options?: VideoExportOptions
       }
-    ) => exportVideoSequence(payload.assets, payload.layers, payload.outputPath, payload.options)
+    ) => {
+      if (payload.mode === 'timeline-audio') {
+        return exportTimelineAudioMix(payload.assets, payload.layers, payload.outputPath)
+      }
+      if (payload.mode === 'sync-pipeline-timeline-audio') {
+        if (!payload.projectId) {
+          throw new Error('Project id is required to sync timeline audio.')
+        }
+        const project = await syncPipelineMasterAudioFromTimeline(
+          payload.projectId,
+          payload.videoEditor ?? {
+            id: payload.projectId,
+            name: '',
+            assets: payload.assets,
+            layers: payload.layers
+          },
+          payload.pipeline
+        )
+        return { project }
+      }
+      return exportVideoSequence(payload.assets, payload.layers, payload.outputPath, payload.options)
+    }
   )
 
   ipcMain.handle(
