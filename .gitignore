@@ -1,4 +1,4 @@
-node_modules
+﻿node_modules
 dist
 out
 logs
@@ -9,3 +9,6 @@ Thumbs.db
 test-audio.wav
 test-*.wav
 release
+resources/whisper/*.bin
+resources/whisper/*.zip
+resources/mfa/
