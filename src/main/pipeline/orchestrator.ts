@@ -54,6 +54,8 @@ const runningCounts: Record<string, number> = {
   segment_video: 0
 }
 const pausedProjects = new Set<string>()
+/** Blocks pump/enqueue after Stop until the user starts a new batch. */
+const stoppedProjects = new Set<string>()
 const imageBatchQuota = new Map<string, number>()
 const videoBatchQuota = new Map<string, number>()
 /** Auto-retries for failed segment videos (projectId → segmentId → attempts). */
@@ -115,6 +117,10 @@ function registerJob(jobId: string, meta: PipelineJobMeta): void {
 
 export function getPipelineJobMeta(jobId: string): PipelineJobMeta | undefined {
   return jobMeta.get(jobId)
+}
+
+function isPipelineHalted(projectId: string): boolean {
+  return pausedProjects.has(projectId) || stoppedProjects.has(projectId)
 }
 
 function canRun(type: PipelineJobType): boolean {
@@ -483,6 +489,7 @@ async function reconcileStaleRunning(
     imageBatchQuota.delete(projectId)
     videoBatchQuota.delete(projectId)
     pausedProjects.delete(projectId)
+    stoppedProjects.delete(projectId)
     next = { ...next, pipelineStatus: 'idle', activePhase: undefined }
     changed = true
     pipelineDebugLog(
@@ -514,7 +521,7 @@ async function finishManualBatchIfIdle(
   projectId: string,
   pipeline: SegmentPipelineState
 ): Promise<SegmentPipelineState> {
-  if (pipeline.pipelineStatus !== 'running' || pausedProjects.has(projectId)) {
+  if (pipeline.pipelineStatus !== 'running' || isPipelineHalted(projectId)) {
     return pipeline
   }
 
@@ -657,6 +664,10 @@ async function enqueueCharacterAnchors(
   project: GenerationProject,
   pipeline: SegmentPipelineState
 ): Promise<SegmentPipelineState> {
+  if (isPipelineHalted(projectId)) {
+    pipelineDebugLog(projectId, 'info', 'anchor', 'Enqueue skipped — pipeline halted')
+    return pipeline
+  }
   let next = { ...pipeline }
   const runningAnchors = next.characters.filter((c) => c.anchorStatus === 'running').length
   if (runningAnchors >= PIPELINE_BATCH_SIZE.character_anchor) {
@@ -727,6 +738,10 @@ async function enqueueSegmentImages(
   project: GenerationProject,
   pipeline: SegmentPipelineState
 ): Promise<SegmentPipelineState> {
+  if (isPipelineHalted(projectId)) {
+    pipelineDebugLog(projectId, 'info', 'image', 'Enqueue skipped — pipeline halted')
+    return pipeline
+  }
   let next = { ...pipeline, segments: [...pipeline.segments] }
 
   let quota = imageBatchQuota.get(projectId) ?? 0
@@ -892,6 +907,10 @@ async function enqueueSegmentVideos(
   project: GenerationProject,
   pipeline: SegmentPipelineState
 ): Promise<SegmentPipelineState> {
+  if (isPipelineHalted(projectId)) {
+    pipelineDebugLog(projectId, 'info', 'video', 'Enqueue skipped — pipeline halted')
+    return pipeline
+  }
   let next = { ...pipeline, segments: [...pipeline.segments] }
 
   if (!allSegmentImagesComplete(next)) {
@@ -1006,6 +1025,10 @@ function allVideosDone(pipeline: SegmentPipelineState): boolean {
 async function pump(projectId: string): Promise<void> {
   if (pausedProjects.has(projectId)) {
     pipelineDebugLog(projectId, 'info', 'pump', 'Pump skipped — pipeline paused')
+    return
+  }
+  if (stoppedProjects.has(projectId)) {
+    pipelineDebugLog(projectId, 'info', 'pump', 'Pump skipped — pipeline stopped')
     return
   }
 
@@ -1133,6 +1156,7 @@ async function beginPipelinePhase(
   }
 
   pausedProjects.delete(projectId)
+  stoppedProjects.delete(projectId)
   if (phase === 'images') {
     imageBatchQuota.set(projectId, PIPELINE_BATCH_SIZE.segment_image)
     imageAutoRetryCounts.delete(projectId)
@@ -1190,11 +1214,90 @@ export async function startPipeline(
 
 export async function pausePipeline(projectId: string): Promise<SegmentPipelineState> {
   pausedProjects.add(projectId)
+  stoppedProjects.delete(projectId)
   const loaded = await loadProjectPipeline(projectId)
   if (!loaded) throw new Error('Project not found.')
   const pipeline = { ...loaded.pipeline, pipelineStatus: 'paused' as const }
   await persistPipeline(loaded.project, pipeline)
   emit(projectId, pipeline)
+  return pipeline
+}
+
+/** Fully halt the pipeline: idle status, cancel in-flight jobs, no resume. */
+export async function stopPipeline(projectId: string): Promise<SegmentPipelineState> {
+  stoppedProjects.add(projectId)
+  pausedProjects.delete(projectId)
+  imageBatchQuota.delete(projectId)
+  videoBatchQuota.delete(projectId)
+
+  const loaded = await loadProjectPipeline(projectId)
+  if (!loaded) throw new Error('Project not found.')
+
+  let cancelled = 0
+  const characters = loaded.pipeline.characters.map((character) => {
+    if (character.anchorStatus !== 'running') return character
+    cancelTrackedJob(character.anchorImageJobId)
+    cancelled += 1
+    return {
+      ...character,
+      anchorStatus: character.anchorImagePath ? ('done' as const) : ('pending' as const),
+      anchorImageJobId: undefined
+    }
+  })
+
+  const segments = loaded.pipeline.segments.map((segment) => {
+    if (segment.status === 'image_running') {
+      cancelTrackedJob(segment.imageJobId)
+      cancelled += 1
+      if (segment.imageLocalPath) {
+        return {
+          ...segment,
+          status: 'image_done' as const,
+          imageJobId: undefined,
+          error: undefined
+        }
+      }
+      return {
+        ...segment,
+        status: 'pending' as const,
+        imageJobId: undefined,
+        error: undefined
+      }
+    }
+    if (segment.status === 'video_running') {
+      cancelTrackedJob(segment.videoJobId)
+      cancelled += 1
+      if (segment.videoLocalPath) {
+        return {
+          ...segment,
+          status: 'video_done' as const,
+          videoJobId: undefined,
+          error: undefined
+        }
+      }
+      return {
+        ...segment,
+        status: segment.imageLocalPath ? ('image_done' as const) : ('pending' as const),
+        videoJobId: undefined,
+        error: undefined
+      }
+    }
+    return segment
+  })
+
+  const pipeline: SegmentPipelineState = {
+    ...loaded.pipeline,
+    characters,
+    segments,
+    pipelineStatus: 'idle',
+    activePhase: undefined,
+    lastError: undefined
+  }
+
+  await persistPipeline(loaded.project, pipeline)
+  emit(projectId, pipeline)
+  await appendPipelineLog(projectId, 'Pipeline stopped by user', { cancelled })
+  pipelineDebugLog(projectId, 'step', 'stop', 'Pipeline stopped', { cancelled })
   return pipeline
 }
 
@@ -1204,6 +1307,7 @@ export async function resumePipeline(
   pipelineOverride?: SegmentPipelineState
 ): Promise<SegmentPipelineState> {
   pausedProjects.delete(projectId)
+  stoppedProjects.delete(projectId)
   const loaded = await loadProjectPipeline(projectId)
   if (!loaded) throw new Error('Project not found.')
 
@@ -1279,6 +1383,8 @@ export async function retrySegment(
 
   pipeline.pipelineStatus = 'running'
   pipeline.activePhase = stage === 'video' ? 'videos' : 'images'
+  pausedProjects.delete(projectId)
+  stoppedProjects.delete(projectId)
   if (stage === 'video') {
     videoBatchQuota.set(projectId, 1)
   } else {
@@ -1629,7 +1735,7 @@ export async function handlePipelineJobUpdate(job: HiggsfieldGenerationJob): Pro
   project = await persistPipeline(project, pipeline)
   emit(meta.projectId, pipeline)
 
-  if (pipeline.pipelineStatus === 'running' && !pausedProjects.has(meta.projectId)) {
+  if (pipeline.pipelineStatus === 'running' && !isPipelineHalted(meta.projectId)) {
     const phase = pipeline.activePhase
     const imageQuota = imageBatchQuota.get(meta.projectId) ?? 0
     if (phase === 'images' && imageQuota > 0) {
@@ -1654,7 +1760,7 @@ export async function handlePipelineJobUpdate(job: HiggsfieldGenerationJob): Pro
       emit(meta.projectId, finished)
     }
 
-    if (finished.pipelineStatus !== 'running' || pausedProjects.has(meta.projectId)) return
+    if (finished.pipelineStatus !== 'running' || isPipelineHalted(meta.projectId)) return
 
     // Auto-continue image batches (and anchor waves) / video batches once the current wave is idle.
     if (finished.activePhase === 'images') {
