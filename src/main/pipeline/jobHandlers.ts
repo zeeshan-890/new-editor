@@ -102,10 +102,47 @@ export function buildSegmentImagePrompt(
       : '',
     'Single unified cinematic frame — one continuous photograph, not a collage.',
     'NOT a character sheet, NOT a reference board, NOT multiple panels, NOT split screen.',
-    'Full scene composition suitable for image-to-video animation: clear subjects, readable depth, natural lighting, room for subtle motion.'
+    'Full scene composition suitable for image-to-video animation: clear subjects, readable depth, natural lighting, room for clear subject and camera motion.'
   ].filter(Boolean)
 
   return parts.join('\n\n')
+}
+
+/** Default when analyze left motion empty or too weak for image-to-video. */
+export const DEFAULT_VIDEO_MOTION_PROMPT =
+  'Visible subject motion and camera movement: natural body language, expressive face, secondary motion (hair, fabric, hands), and a slow cinematic push-in or orbit. Do not hold as a still frame.'
+
+const WEAK_MOTION_PHRASE =
+  /\b(subtle|gentle|minimal|slight|soft|barely|almost\s+still|static|frozen)\b/i
+const STRONG_MOTION_CUE =
+  /\b(walk|turn|reach|gesture|speak|talk|pour|open|close|pan|dolly|orbit|zoom|push[- ]?in|pull[- ]?out|tilt|nod|blink|breathe|hand|move|moving|action|interact)\b/i
+
+function isWeakVideoMotion(motion: string): boolean {
+  const trimmed = motion.trim()
+  if (!trimmed) return true
+  if (trimmed === 'Subtle natural motion, gentle camera movement, cinematic pacing.') return true
+  if (/^subtle\b/i.test(trimmed) && !STRONG_MOTION_CUE.test(trimmed)) return true
+  if (WEAK_MOTION_PHRASE.test(trimmed) && !STRONG_MOTION_CUE.test(trimmed)) return true
+  return false
+}
+
+function deriveMotionFromSegment(segment: ScriptSegment): string {
+  const clipHint = segment.imagePrompt?.trim().slice(0, 160)
+  if (clipHint) {
+    return `Animate the scene with clear continuous motion matching: ${clipHint}. Camera slowly pushes in; subjects move naturally — not a still frame.`
+  }
+  const vo = segment.scriptText?.trim().slice(0, 120)
+  if (vo) {
+    return `Animate to match the narration beat ("${vo}"): visible subject action and a slow cinematic camera move throughout.`
+  }
+  return DEFAULT_VIDEO_MOTION_PROMPT
+}
+
+/** Resolve motion text for logging / enqueue (strengthens weak analyze defaults). */
+export function resolveSegmentVideoMotion(segment: ScriptSegment): string {
+  const raw = segment.videoMotionPrompt?.trim() ?? ''
+  if (!raw || isWeakVideoMotion(raw)) return deriveMotionFromSegment(segment)
+  return raw
 }
 
 export function videoDurationFromMatch(
@@ -166,12 +203,11 @@ export function buildSegmentVideoPrompt(
   segment: ScriptSegment,
   pipeline: SegmentPipelineState
 ): string {
-  const motion =
-    segment.videoMotionPrompt?.trim() ||
-    'Subtle natural motion, gentle camera movement, cinematic pacing.'
+  const motion = resolveSegmentVideoMotion(segment)
 
   const parts = [
     motion,
+    'Animate this still into video with clear, continuous motion for the full duration — subjects move and interact; camera drifts or pushes in. Avoid a static freeze-frame look.',
     attachedReferenceHint(segment, pipeline),
     'Keep identity, wardrobe, and packaging consistent with the start frame and any attached references.'
   ].filter(Boolean)
