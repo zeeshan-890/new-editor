@@ -45,12 +45,12 @@ function clipFallbackPrompt(scene: ParsedScene): string {
 
 function clipFallbackMotion(scene: ParsedScene): string {
   if (scene.clips.length > 1) {
-    return `Subtle cinematic motion: ${scene.clips.map((c) => c.description).join('; ')}`
+    return `Clear continuous motion through the shot: ${scene.clips.map((c) => c.description).join('; ')}. Slow cinematic push-in; subjects move naturally — not a still.`
   }
   if (scene.clips[0]) {
-    return `Gentle camera motion on: ${scene.clips[0].description}`
+    return `Animate with visible action matching: ${scene.clips[0].description}. Camera slowly pushes in; natural body language and secondary motion (hands, fabric, face).`
   }
-  return 'Subtle natural motion, gentle camera movement, cinematic pacing.'
+  return 'Visible subject motion and camera movement: natural body language, expressive face, secondary motion (hair, fabric, hands), and a slow cinematic push-in or orbit. Do not hold as a still frame.'
 }
 
 /**
@@ -78,8 +78,8 @@ export function finalizeStructuredSegments(
         sanitizeGeneratedPrompt(segment.imagePrompt) || clipFallbackPrompt(scene)
       let videoMotionPrompt = sanitizeGeneratedPrompt(segment.videoMotionPrompt ?? '')
       if (!videoMotionPrompt) videoMotionPrompt = clipFallbackMotion(scene)
-      if (videoMotionPrompt.length > 280) {
-        videoMotionPrompt = videoMotionPrompt.slice(0, 280).replace(/\s+\S*$/, '')
+      if (videoMotionPrompt.length > 360) {
+        videoMotionPrompt = videoMotionPrompt.slice(0, 360).replace(/\s+\S*$/, '')
       }
 
       return {
