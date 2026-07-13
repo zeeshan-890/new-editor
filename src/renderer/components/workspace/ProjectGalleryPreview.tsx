@@ -1,9 +1,11 @@
-import { memo, useCallback, useMemo } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import {
+  CheckSquare,
   Clock,
   Download,
   Loader2,
   Scissors,
+  Square,
   Sparkles
 } from 'lucide-react'
 import { cn } from '@renderer/lib/utils'
@@ -11,7 +13,10 @@ import { Button } from '../common/Button'
 import { setGalleryDragData } from '@renderer/lib/galleryDrag'
 import { generationVideoSrc } from '@renderer/lib/projectEditorMedia'
 import { useProjectGallery } from '@renderer/hooks/useProjectGallery'
-import type { GalleryEntry } from '@renderer/lib/projectGallerySections'
+import {
+  flattenGalleryGenerations,
+  type GalleryEntry
+} from '@renderer/lib/projectGallerySections'
 import type { CharacterProfile, ScriptSegment } from '@shared/segmentPipeline'
 import type {
   GenerationComposerSnapshot,
@@ -53,18 +58,22 @@ const MemoGalleryTile = memo(function GalleryTile({
   item,
   indexLabel,
   selected,
+  checked,
   onPreview,
   onLoadSettings,
   onDownload,
-  onAddToEditor
+  onAddToEditor,
+  onToggleSelect
 }: {
   item: ProjectGeneration
   indexLabel: string
   selected: boolean
+  checked: boolean
   onPreview: (item: ProjectGeneration) => void
   onLoadSettings: (item: ProjectGeneration) => void
   onDownload: (item: ProjectGeneration) => void
   onAddToEditor: (item: ProjectGeneration) => void
+  onToggleSelect: (item: ProjectGeneration) => void
 }): React.JSX.Element {
   const isVideo = item.type === 'video' || isVideoUrl(item.url)
   const mediaSrc = generationVideoSrc(item)
@@ -78,16 +87,37 @@ const MemoGalleryTile = memo(function GalleryTile({
       }}
       className={cn(
         'group relative aspect-square rounded-lg border overflow-hidden bg-card cursor-pointer',
-        selected
-          ? 'border-primary ring-2 ring-primary/60 shadow-lg shadow-primary/10'
-          : 'border-border hover:border-primary/40'
+        checked
+          ? 'border-sky-500 ring-2 ring-sky-500/50'
+          : selected
+            ? 'border-primary ring-2 ring-primary/60 shadow-lg shadow-primary/10'
+            : 'border-border hover:border-primary/40'
       )}
       onClick={() => onPreview(item)}
       onDoubleClick={() => onLoadSettings(item)}
     >
       <LazyGalleryMedia src={mediaSrc} alt={item.prompt} isVideo={isVideo} />
 
-      <div className="absolute top-2 left-2 flex flex-col gap-1 items-start pointer-events-none">
+      <button
+        type="button"
+        className={cn(
+          'absolute top-2 left-2 z-10 rounded bg-black/55 p-1 hover:bg-black/75',
+          checked || 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'
+        )}
+        title={checked ? 'Deselect' : 'Select for download'}
+        onClick={(e) => {
+          e.stopPropagation()
+          onToggleSelect(item)
+        }}
+      >
+        {checked ? (
+          <CheckSquare size={14} className="text-sky-300" />
+        ) : (
+          <Square size={14} className="text-white/90" />
+        )}
+      </button>
+
+      <div className="absolute top-2 left-9 flex flex-col gap-1 items-start pointer-events-none">
         <span
           className={cn(
             'rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
@@ -271,19 +301,23 @@ const MemoPendingSegmentApprovalTile = memo(function PendingSegmentApprovalTile(
 const MemoGalleryEntryTile = memo(function GalleryEntryTile({
   entry,
   selectedGenerationId,
+  selectedIds,
   onPreview,
   onLoadSettings,
   onDownload,
   onAddToEditor,
-  onApproveSegment
+  onApproveSegment,
+  onToggleSelect
 }: {
   entry: GalleryEntry
   selectedGenerationId?: string | null
+  selectedIds: Set<string>
   onPreview: (item: ProjectGeneration) => void
   onLoadSettings: (item: ProjectGeneration) => void
   onDownload: (item: ProjectGeneration) => void
   onAddToEditor: (item: ProjectGeneration) => void
   onApproveSegment: (segmentId: string) => void
+  onToggleSelect: (item: ProjectGeneration) => void
 }): React.JSX.Element {
   switch (entry.kind) {
     case 'pending-job':
@@ -307,10 +341,12 @@ const MemoGalleryEntryTile = memo(function GalleryEntryTile({
           item={entry.item}
           indexLabel={entry.badge ?? `#${entry.item.id.slice(0, 6)}`}
           selected={selectedGenerationId === entry.item.id}
+          checked={selectedIds.has(entry.item.id)}
           onPreview={onPreview}
           onLoadSettings={onLoadSettings}
           onDownload={onDownload}
           onAddToEditor={onAddToEditor}
+          onToggleSelect={onToggleSelect}
         />
       )
     default:
@@ -324,6 +360,7 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
   onPreview,
   onLoadSettings,
   onDownload,
+  onDownloadMany,
   onAddToEditor,
   onApproveSegment
 }: {
@@ -332,10 +369,22 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
   onPreview: (item: ProjectGeneration) => void
   onLoadSettings: (item: ProjectGeneration) => void
   onDownload: (item: ProjectGeneration) => void
+  onDownloadMany: (items: ProjectGeneration[]) => void | Promise<void>
   onAddToEditor: (item: ProjectGeneration) => void
   onApproveSegment: (segmentId: string) => void
 }): React.JSX.Element {
   const { gallerySections, galleryCounts } = useProjectGallery(projectId)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
+  const [downloading, setDownloading] = useState(false)
+
+  useEffect(() => {
+    setSelectedIds(new Set())
+  }, [projectId])
+
+  const downloadableItems = useMemo(
+    () => flattenGalleryGenerations(gallerySections),
+    [gallerySections]
+  )
 
   const sections = useMemo(
     () => [
@@ -347,25 +396,57 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
     [gallerySections]
   )
 
+  const handleToggleSelect = useCallback((item: ProjectGeneration) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(item.id)) next.delete(item.id)
+      else next.add(item.id)
+      return next
+    })
+  }, [])
+
+  const handleSelectAll = useCallback(() => {
+    setSelectedIds(new Set(downloadableItems.map((item) => item.id)))
+  }, [downloadableItems])
+
+  const handleClearSelection = useCallback(() => {
+    setSelectedIds(new Set())
+  }, [])
+
+  const handleDownloadSelected = useCallback(async () => {
+    const items = downloadableItems.filter((item) => selectedIds.has(item.id))
+    if (items.length === 0) return
+    setDownloading(true)
+    try {
+      await onDownloadMany(items)
+    } finally {
+      setDownloading(false)
+    }
+  }, [downloadableItems, onDownloadMany, selectedIds])
+
   const renderTile = useCallback(
     (entry: GalleryEntry) => (
       <MemoGalleryEntryTile
         entry={entry}
         selectedGenerationId={selectedGenerationId}
+        selectedIds={selectedIds}
         onPreview={onPreview}
         onLoadSettings={onLoadSettings}
         onDownload={onDownload}
         onAddToEditor={onAddToEditor}
         onApproveSegment={onApproveSegment}
+        onToggleSelect={handleToggleSelect}
       />
     ),
     [
       selectedGenerationId,
+      selectedIds,
       onPreview,
       onLoadSettings,
       onDownload,
       onAddToEditor,
-      onApproveSegment
+      onApproveSegment,
+      handleToggleSelect
     ]
   )
 
@@ -378,11 +459,54 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
     )
   }
 
+  const selectedCount = selectedIds.size
+  const allSelected =
+    downloadableItems.length > 0 && selectedCount === downloadableItems.length
+
   return (
-    <GalleryVirtualScroll
-      sections={sections}
-      getEntryKey={galleryEntryKey}
-      renderTile={renderTile}
-    />
+    <div className="flex h-full min-h-0 flex-col gap-2">
+      <div className="flex items-center gap-2 shrink-0 flex-wrap">
+        <Button size="sm" variant="outline" onClick={allSelected ? handleClearSelection : handleSelectAll}>
+          {allSelected ? (
+            <>
+              <CheckSquare size={14} className="mr-1" /> Clear selection
+            </>
+          ) : (
+            <>
+              <Square size={14} className="mr-1" /> Select all
+            </>
+          )}
+        </Button>
+        {selectedCount > 0 && (
+          <>
+            <Button size="sm" variant="outline" onClick={handleClearSelection}>
+              Clear ({selectedCount})
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => void handleDownloadSelected()}
+              disabled={downloading}
+            >
+              {downloading ? (
+                <Loader2 size={14} className="mr-1 animate-spin" />
+              ) : (
+                <Download size={14} className="mr-1" />
+              )}
+              Download selected ({selectedCount})
+            </Button>
+          </>
+        )}
+        <span className="text-[10px] text-muted">
+          Hover a card and click the checkbox to multi-select
+        </span>
+      </div>
+      <div className="min-h-0 flex-1">
+        <GalleryVirtualScroll
+          sections={sections}
+          getEntryKey={galleryEntryKey}
+          renderTile={renderTile}
+        />
+      </div>
+    </div>
   )
 })
