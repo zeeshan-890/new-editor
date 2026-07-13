@@ -1,7 +1,7 @@
 import { stat } from 'fs/promises'
 import type { TranscriptSegment } from './matchScript'
 import type { TranscriptWordSegment } from './whisper'
-import { whisperModelLabel } from './whisper'
+import { activeTranscriptionProviderLabel } from './transcribe'
 
 interface CachedTranscript {
   segments: TranscriptSegment[]
@@ -14,8 +14,13 @@ interface CachedTranscript {
 
 const cache = new Map<string, CachedTranscript>()
 
-function cacheKey(audioPath: string, trimStartMs?: number, trimEndMs?: number): string {
-  return `${audioPath}|${trimStartMs ?? 0}|${trimEndMs ?? ''}|${whisperModelLabel()}`
+async function cacheKey(
+  audioPath: string,
+  trimStartMs?: number,
+  trimEndMs?: number
+): Promise<string> {
+  const model = await activeTranscriptionProviderLabel()
+  return `${audioPath}|${trimStartMs ?? 0}|${trimEndMs ?? ''}|${model}`
 }
 
 async function audioFingerprint(
@@ -38,7 +43,7 @@ export async function getCachedTranscript(
   wordSegments: TranscriptWordSegment[]
   hasWordTimestamps: boolean
 } | null> {
-  const key = cacheKey(audioPath, trimStartMs, trimEndMs)
+  const key = await cacheKey(audioPath, trimStartMs, trimEndMs)
   const cached = cache.get(key)
   if (!cached) return null
 
@@ -48,7 +53,8 @@ export async function getCachedTranscript(
     cache.delete(key)
     return null
   }
-  if (cached.model !== whisperModelLabel()) {
+  const model = await activeTranscriptionProviderLabel()
+  if (cached.model !== model) {
     cache.delete(key)
     return null
   }
@@ -71,13 +77,14 @@ export async function setCachedTranscript(
   const fingerprint = await audioFingerprint(audioPath)
   if (!fingerprint) return
 
-  cache.set(cacheKey(audioPath, trimStartMs, trimEndMs), {
+  const model = await activeTranscriptionProviderLabel()
+  cache.set(await cacheKey(audioPath, trimStartMs, trimEndMs), {
     segments,
     wordSegments,
     hasWordTimestamps,
     mtimeMs: fingerprint.mtimeMs,
     size: fingerprint.size,
-    model: whisperModelLabel()
+    model
   })
 }
 
