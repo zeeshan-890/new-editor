@@ -115,6 +115,26 @@ export function cancelJob(jobId: string): boolean {
   return true
 }
 
+/** Force a queued/running job to failed (used when clearing stuck pipeline tiles). */
+export function failJob(jobId: string, error = 'Cleared by user'): boolean {
+  const job = jobs.get(jobId)
+  if (!job) return false
+  if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+    return false
+  }
+
+  pendingRequests.delete(jobId)
+  const idx = pendingQueue.indexOf(jobId)
+  if (idx >= 0) pendingQueue.splice(idx, 1)
+
+  job.status = 'failed'
+  job.error = error
+  job.completedAt = Date.now()
+  job.progressMessage = undefined
+  emit(job)
+  return true
+}
+
 export async function enqueueJob(request: HiggsfieldEnqueueRequest): Promise<HiggsfieldGenerationJob> {
   let refs = request.references ?? []
   if (request.projectId && refs.length > 0) {
