@@ -16,6 +16,7 @@ import { applyVideoSoundParams } from '../../shared/videoGeneration'
 import {
   buildSegmentImageReferences
 } from '../../shared/pipelineImageRefs'
+import { appendSceneVisualGuards } from '../../shared/pipelinePromptGuards'
 
 export { buildSegmentImageReferences } from '../../shared/pipelineImageRefs'
 
@@ -105,7 +106,8 @@ export function buildSegmentImagePrompt(
     'Full scene composition suitable for image-to-video animation: clear subjects, readable depth, natural lighting, room for clear subject and camera motion.'
   ].filter(Boolean)
 
-  return parts.join('\n\n')
+  // Hardcoded visual-mode guards at enqueue time (applies even without re-analyze).
+  return appendSceneVisualGuards(parts.join('\n\n'), segment.imagePrompt, segment.scriptText)
 }
 
 /** Default when analyze left motion empty or too weak for image-to-video. */
@@ -212,7 +214,12 @@ export function buildSegmentVideoPrompt(
     'Keep identity, wardrobe, and packaging consistent with the start frame and any attached references.'
   ].filter(Boolean)
 
-  return parts.join('\n\n')
+  return appendSceneVisualGuards(
+    parts.join('\n\n'),
+    segment.imagePrompt,
+    segment.scriptText,
+    { forVideo: true }
+  )
 }
 
 export function buildSegmentVideoEnqueue(
