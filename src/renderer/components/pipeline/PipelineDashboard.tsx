@@ -3,6 +3,7 @@ import {
   Loader2,
   Pause,
   Play,
+  Square,
   Film,
   Sparkles,
   RefreshCw,
@@ -65,6 +66,7 @@ export function PipelineDashboard({
   const startPipelineImages = usePipelineStore((s) => s.startPipelineImages)
   const startPipelineVideos = usePipelineStore((s) => s.startPipelineVideos)
   const pausePipeline = usePipelineStore((s) => s.pausePipeline)
+  const stopPipeline = usePipelineStore((s) => s.stopPipeline)
   const resumePipeline = usePipelineStore((s) => s.resumePipeline)
   const syncTimelineAudio = usePipelineStore((s) => s.syncTimelineAudio)
   const matchSegmentTimings = usePipelineStore((s) => s.matchSegmentTimings)
@@ -72,6 +74,7 @@ export function PipelineDashboard({
 
   const [scriptDraft, setScriptDraft] = useState(() => pipeline.fullScript)
   const [localError, setLocalError] = useState<string | null>(null)
+  const [stopping, setStopping] = useState(false)
   const [llmSettingsOpen, setLlmSettingsOpen] = useState(false)
   const scriptSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const scriptDirtyRef = useRef(false)
@@ -90,6 +93,7 @@ export function PipelineDashboard({
   useEffect(() => {
     setScriptDraft(pipeline.fullScript)
     setLocalError(null)
+    setStopping(false)
     scriptDirtyRef.current = false
   }, [projectId])
 
@@ -296,6 +300,18 @@ export function PipelineDashboard({
       await startPipelineVideos(projectId)
     } catch (err) {
       setLocalError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const handleStopPipeline = async (): Promise<void> => {
+    setLocalError(null)
+    setStopping(true)
+    try {
+      await stopPipeline(projectId)
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setStopping(false)
     }
   }
 
@@ -520,13 +536,45 @@ export function PipelineDashboard({
           Get segment timings
         </Button>
         {pipeline.pipelineStatus === 'running' && batchBusy ? (
-          <Button size="sm" onClick={() => void pausePipeline(projectId)}>
-            <Pause size={14} className="mr-1" /> Pause
-          </Button>
+          <>
+            <Button size="sm" onClick={() => void pausePipeline(projectId)}>
+              <Pause size={14} className="mr-1" /> Pause
+            </Button>
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={stopping}
+              title="Fully stop the pipeline and cancel in-flight jobs"
+              onClick={() => void handleStopPipeline()}
+            >
+              {stopping ? (
+                <Loader2 size={14} className="mr-1 animate-spin" />
+              ) : (
+                <Square size={14} className="mr-1" />
+              )}
+              Stop
+            </Button>
+          </>
         ) : pipeline.pipelineStatus === 'paused' ? (
-          <Button size="sm" onClick={() => void resumePipeline(projectId)}>
-            <Play size={14} className="mr-1" /> Resume
-          </Button>
+          <>
+            <Button size="sm" onClick={() => void resumePipeline(projectId)}>
+              <Play size={14} className="mr-1" /> Resume
+            </Button>
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={stopping}
+              title="Fully stop the pipeline and cancel in-flight jobs"
+              onClick={() => void handleStopPipeline()}
+            >
+              {stopping ? (
+                <Loader2 size={14} className="mr-1 animate-spin" />
+              ) : (
+                <Square size={14} className="mr-1" />
+              )}
+              Stop
+            </Button>
+          </>
         ) : (
           <>
             {stuckRunningIdle && (
@@ -537,6 +585,22 @@ export function PipelineDashboard({
                 title="Pipeline thinks it is running but nothing is generating — unlock to continue"
               >
                 Unlock
+              </Button>
+            )}
+            {(pipeline.pipelineStatus === 'running' || stuckRunningIdle) && (
+              <Button
+                size="sm"
+                variant="destructive"
+                disabled={stopping}
+                title="Fully stop the pipeline and cancel in-flight jobs"
+                onClick={() => void handleStopPipeline()}
+              >
+                {stopping ? (
+                  <Loader2 size={14} className="mr-1 animate-spin" />
+                ) : (
+                  <Square size={14} className="mr-1" />
+                )}
+                Stop
               </Button>
             )}
             {canStartImageBatch && (
