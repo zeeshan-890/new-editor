@@ -1,4 +1,4 @@
-import { ipcMain, dialog, BrowserWindow, shell } from 'electron'
+import { ipcMain, dialog, BrowserWindow, shell, clipboard } from 'electron'
 import { existsSync, promises as fs } from 'fs'
 import { basename, extname, join } from 'path'
 import { tmpdir } from 'os'
@@ -68,11 +68,16 @@ import {
   saveSession
 } from '../projects/store'
 import { hydrateGenerationDraft, ensureGenerationMediaInProject } from '../projects/media'
-import { alignScriptAudio } from '../alignment/whisper'
+import { alignScriptAudio } from '../alignment/alignScript'
 import { batchMatchScriptAudio } from '../alignment/batchMatchScript'
 import { analyzeScript } from '../intelligence/analyzeScript'
 import { applyAnalysisToPipeline } from '../intelligence/applyAnalysis'
 import { loadLlmSettings, saveLlmSettings } from '../llm/settings'
+import {
+  loadAssemblyAiSettings,
+  saveAssemblyAiSettings
+} from '../alignment/assemblyaiSettings'
+import { clearTranscriptCache } from '../alignment/transcriptCache'
 import {
   getPipelineState,
   handlePipelineJobUpdate,
@@ -80,6 +85,9 @@ import {
   pausePipeline,
   resumePipeline,
   retrySegment,
+  dismissStuckSegment,
+  dismissStuckCharacter,
+  dismissAllStuckRunning,
   setPipelineNotifyCallback,
   startPipelineImages,
   startPipelineVideos
@@ -248,6 +256,17 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     saveLlmSettings(settings)
   )
 
+  ipcMain.handle(IPC.ASSEMBLYAI_SETTINGS_GET, async () => loadAssemblyAiSettings())
+
+  ipcMain.handle(
+    IPC.ASSEMBLYAI_SETTINGS_SAVE,
+    async (_e, settings: import('../../shared/segmentPipeline').AssemblyAiSettings) => {
+      const saved = await saveAssemblyAiSettings(settings)
+      clearTranscriptCache()
+      return saved
+    }
+  )
+
   ipcMain.handle(IPC.LLM_ANALYZE_SCRIPT, async (_e, input: string | import('../../shared/segmentPipeline').AnalyzeScriptInput) =>
     analyzeScript(input)
   )
@@ -324,6 +343,22 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
     IPC.PIPELINE_RETRY_SEGMENT,
     async (_e, payload: { projectId: string; segmentId: string; stage: 'image' | 'video' | 'full' }) =>
       retrySegment(payload.projectId, payload.segmentId, payload.stage)
+  )
+
+  ipcMain.handle(
+    IPC.PIPELINE_DISMISS_STUCK_SEGMENT,
+    async (_e, payload: { projectId: string; segmentId: string }) =>
+      dismissStuckSegment(payload.projectId, payload.segmentId)
+  )
+
+  ipcMain.handle(
+    IPC.PIPELINE_DISMISS_STUCK_CHARACTER,
+    async (_e, payload: { projectId: string; characterId: string }) =>
+      dismissStuckCharacter(payload.projectId, payload.characterId)
+  )
+
+  ipcMain.handle(IPC.PIPELINE_DISMISS_ALL_STUCK, async (_e, projectId: string) =>
+    dismissAllStuckRunning(projectId)
   )
 
   ipcMain.handle(
@@ -444,15 +479,25 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
         throw new Error('Analyze script first to create segments.')
       }
 
+      // Always recompute from a fresh transcript + sequential matcher (drop stale weighted matches).
+      clearTranscriptCache()
+      const cleared = {
+        ...pipeline,
+        segments: pipeline.segments.map((segment) => ({
+          ...segment,
+          scriptMatch: null
+        }))
+      }
+
       const result = await batchMatchScriptAudio({
-        audioPath: pipeline.masterAudioPath,
-        fullScript: pipeline.fullScript,
-        segments: pipeline.segments.map((s) => ({
+        audioPath: cleared.masterAudioPath!,
+        fullScript: cleared.fullScript,
+        segments: cleared.segments.map((s) => ({
           id: s.id,
           scriptText: s.scriptText,
           index: s.index
         })),
-        audioDurationMs: pipeline.masterAudioDurationMs
+        audioDurationMs: cleared.masterAudioDurationMs
       })
       if (result.matches.length === 0) {
         const reason = result.warnings[0] ?? 'Could not extract segment timings from audio.'
@@ -460,10 +505,19 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       }
 
       const byId = new Map(result.matches.map((m) => [m.segmentId, m.match]))
+      const sequentialCount = result.matches.filter(
+        (m) => m.match.matchSource === 'sequential' || m.match.matchSource === 'word-aligned'
+      ).length
+      pipelineDebugLog(payload.projectId, 'step', 'audio', 'Segment timings recomputed', {
+        matched: result.matches.length,
+        sequential: sequentialCount,
+        warnings: result.warnings
+      })
+
       const next = {
-        ...pipeline,
+        ...cleared,
         lastError: undefined,
-        segments: pipeline.segments.map((segment) => {
+        segments: cleared.segments.map((segment) => {
           const match = byId.get(segment.id)
           if (!match) return { ...segment, scriptMatch: null }
           return {
@@ -573,6 +627,21 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
         return { project }
       }
       return exportVideoSequence(payload.assets, payload.layers, payload.outputPath, payload.options)
+    }
+  )
+
+  ipcMain.handle(
+    IPC.CLIPBOARD_READ_IMAGE,
+    async (): Promise<{ data: ArrayBuffer; fileName: string } | null> => {
+      const image = clipboard.readImage()
+      if (image.isEmpty()) return null
+      const png = image.toPNG()
+      const copy = new Uint8Array(png.byteLength)
+      copy.set(png)
+      return {
+        data: copy.buffer,
+        fileName: `pasted-image-${Date.now()}.png`
+      }
     }
   )
 
