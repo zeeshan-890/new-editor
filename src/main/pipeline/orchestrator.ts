@@ -2,7 +2,7 @@ import { join } from 'path'
 import { existsSync } from 'fs'
 import { promises as fs } from 'fs'
 import type { HiggsfieldGenerationJob } from '../../shared/types'
-import type { PipelineJobType, PipelineGenerationPhase, SegmentPipelineState } from '../../shared/segmentPipeline'
+import type { PipelineJobType, PipelineGenerationPhase, SegmentPipelineState, ScriptSegment } from '../../shared/segmentPipeline'
 import {
   allSegmentImagesComplete,
   anchorsInFlight,
@@ -14,7 +14,7 @@ import {
 import type { GenerationProject } from '../../shared/types'
 import { normalizeLoadedGenerationProject } from '../../shared/segmentPipeline'
 import { loadProject, saveProject, mediaDir, importMediaToProject } from '../projects/store'
-import { enqueueJob, getJob } from '../higgsfield/queue'
+import { enqueueJob, getJob, cancelJob, failJob } from '../higgsfield/queue'
 import { batchMatchScriptAudio } from '../alignment/batchMatchScript'
 import {
   buildCharacterAnchorEnqueue,
@@ -56,6 +56,12 @@ const runningCounts: Record<string, number> = {
 const pausedProjects = new Set<string>()
 const imageBatchQuota = new Map<string, number>()
 const videoBatchQuota = new Map<string, number>()
+/** Auto-retries for failed segment videos (projectId → segmentId → attempts). */
+const videoAutoRetryCounts = new Map<string, Map<string, number>>()
+/** Auto-retries for failed segment images (projectId → segmentId → attempts). */
+const imageAutoRetryCounts = new Map<string, Map<string, number>>()
+const MAX_VIDEO_AUTO_RETRIES = 2
+const MAX_IMAGE_AUTO_RETRIES = 2
 let notifyCallback: NotifyFn | null = null
 
 export function setPipelineNotifyCallback(cb: NotifyFn | null): void {
@@ -188,10 +194,189 @@ function canStartNextVideoBatch(pipeline: SegmentPipelineState): boolean {
   return !videosInFlight(pipeline)
 }
 
+function getVideoAutoRetryCount(projectId: string, segmentId: string): number {
+  return videoAutoRetryCounts.get(projectId)?.get(segmentId) ?? 0
+}
+
+function bumpVideoAutoRetry(projectId: string, segmentId: string): number {
+  let byProject = videoAutoRetryCounts.get(projectId)
+  if (!byProject) {
+    byProject = new Map()
+    videoAutoRetryCounts.set(projectId, byProject)
+  }
+  const next = (byProject.get(segmentId) ?? 0) + 1
+  byProject.set(segmentId, next)
+  return next
+}
+
+function clearVideoAutoRetry(projectId: string, segmentId: string): void {
+  videoAutoRetryCounts.get(projectId)?.delete(segmentId)
+}
+
+function getImageAutoRetryCount(projectId: string, segmentId: string): number {
+  return imageAutoRetryCounts.get(projectId)?.get(segmentId) ?? 0
+}
+
+function bumpImageAutoRetry(projectId: string, segmentId: string): number {
+  let byProject = imageAutoRetryCounts.get(projectId)
+  if (!byProject) {
+    byProject = new Map()
+    imageAutoRetryCounts.set(projectId, byProject)
+  }
+  const next = (byProject.get(segmentId) ?? 0) + 1
+  byProject.set(segmentId, next)
+  return next
+}
+
+function clearImageAutoRetry(projectId: string, segmentId: string): void {
+  imageAutoRetryCounts.get(projectId)?.delete(segmentId)
+}
+
+/** Segments ready for image (re)enqueue. */
+function pendingImageEnqueueTargets(
+  projectId: string,
+  pipeline: SegmentPipelineState
+): ScriptSegment[] {
+  return pipeline.segments
+    .filter(
+      (s) =>
+        !s.imageLocalPath &&
+        s.status !== 'image_running' &&
+        s.status !== 'image_done' &&
+        s.status !== 'video_running' &&
+        s.status !== 'video_done' &&
+        s.status !== 'timeline_placed' &&
+        segmentImageReady(s.id, pipeline) &&
+        (s.status !== 'failed' || getImageAutoRetryCount(projectId, s.id) < MAX_IMAGE_AUTO_RETRIES)
+    )
+    .sort((a, b) => a.index - b.index)
+}
+
+/** Reset retryable image failures so the next batch can pick them up. */
+function prepareImageRetries(
+  projectId: string,
+  pipeline: SegmentPipelineState
+): { pipeline: SegmentPipelineState; retrying: number; exhausted: number } {
+  let retrying = 0
+  let exhausted = 0
+  const segments = pipeline.segments.map((segment) => {
+    if (segment.imageLocalPath) return segment
+    if (
+      segment.status === 'image_running' ||
+      segment.status === 'image_done' ||
+      segment.status === 'video_running' ||
+      segment.status === 'video_done' ||
+      segment.status === 'timeline_placed'
+    ) {
+      return segment
+    }
+    if (segment.status !== 'failed') return segment
+
+    const attempts = getImageAutoRetryCount(projectId, segment.id)
+    if (attempts >= MAX_IMAGE_AUTO_RETRIES) {
+      exhausted += 1
+      return {
+        ...segment,
+        status: 'failed' as const,
+        imageJobId: undefined,
+        error:
+          segment.error ??
+          `Image generation failed after ${MAX_IMAGE_AUTO_RETRIES} retries`
+      }
+    }
+
+    retrying += 1
+    return {
+      ...segment,
+      status: 'pending' as const,
+      imageJobId: undefined,
+      error: undefined
+    }
+  })
+
+  return { pipeline: { ...pipeline, segments }, retrying, exhausted }
+}
+
+/** Segments ready for (re)enqueue: have image + timings, no video yet, not currently running. */
+function pendingVideoEnqueueTargets(pipeline: SegmentPipelineState): ScriptSegment[] {
+  return pipeline.segments
+    .filter(
+      (s) =>
+        Boolean(s.imageLocalPath) &&
+        Boolean(s.scriptMatch) &&
+        !s.videoLocalPath &&
+        s.status !== 'video_running' &&
+        s.status !== 'video_done' &&
+        s.status !== 'timeline_placed' &&
+        (s.status !== 'failed' || Boolean(s.imageLocalPath))
+    )
+    .sort((a, b) => a.index - b.index)
+}
+
+/** Reset retryable video failures so the next batch can pick them up. */
+function prepareVideoRetries(
+  projectId: string,
+  pipeline: SegmentPipelineState
+): { pipeline: SegmentPipelineState; retrying: number; exhausted: number } {
+  let retrying = 0
+  let exhausted = 0
+  const segments = pipeline.segments.map((segment) => {
+    if (!segment.imageLocalPath || segment.videoLocalPath) return segment
+    if (
+      segment.status === 'video_running' ||
+      segment.status === 'video_done' ||
+      segment.status === 'timeline_placed'
+    ) {
+      return segment
+    }
+    if (segment.status !== 'failed') return segment
+
+    const attempts = getVideoAutoRetryCount(projectId, segment.id)
+    if (attempts >= MAX_VIDEO_AUTO_RETRIES) {
+      exhausted += 1
+      return {
+        ...segment,
+        status: 'failed' as const,
+        videoJobId: undefined,
+        error:
+          segment.error ??
+          `Video generation failed after ${MAX_VIDEO_AUTO_RETRIES} retries`
+      }
+    }
+
+    retrying += 1
+    return {
+      ...segment,
+      status: 'image_done' as const,
+      videoJobId: undefined,
+      error: undefined
+    }
+  })
+
+  return { pipeline: { ...pipeline, segments }, retrying, exhausted }
+}
+
 function isActiveGenerationJob(jobId: string | undefined): boolean {
   if (!jobId) return false
   const job = getJob(jobId)
   return job?.status === 'queued' || job?.status === 'running'
+}
+
+/** True only when a segment/anchor still has a live queued/running Higgsfield job. */
+function hasLiveGenerationWork(pipeline: SegmentPipelineState): boolean {
+  if (
+    pipeline.characters.some(
+      (character) =>
+        character.anchorStatus === 'running' && isActiveGenerationJob(character.anchorImageJobId)
+    )
+  ) {
+    return true
+  }
+  return pipeline.segments.some((segment) => {
+    if (segment.status === 'image_running') return isActiveGenerationJob(segment.imageJobId)
+    if (segment.status === 'video_running') return isActiveGenerationJob(segment.videoJobId)
+    return false
+  })
 }
 
 function releaseOrphanedJobMeta(jobId: string | undefined): void {
@@ -272,12 +457,54 @@ async function reconcileStaleRunning(
   project: GenerationProject,
   pipeline: SegmentPipelineState
 ): Promise<{ project: GenerationProject; pipeline: SegmentPipelineState }> {
-  const { pipeline: next, cleared } = clearStaleRunningStatuses(pipeline)
-  if (cleared === 0) return { project, pipeline }
-  pipelineDebugLog(projectId, 'warn', 'pump', `Cleared ${cleared} stuck running segment(s)/anchor(s)`, {
-    cleared
-  })
-  await appendPipelineLog(projectId, 'Cleared stuck running statuses', { cleared })
+  const { pipeline: clearedPipeline, cleared } = clearStaleRunningStatuses(pipeline)
+  let next = clearedPipeline
+  let changed = cleared > 0
+
+  // After restart (or after clearing stuck jobs), pipelineStatus can remain
+  // "running"/"paused" with nothing actually in flight — reset to idle so Pause goes away.
+  // Do NOT idle when a fresh batch still has quota (jobs not enqueued yet / mid-pump).
+  const nothingInFlight =
+    !imagesInFlight(next) && !videosInFlight(next) && !anchorsInFlight(next)
+  const hasBatchQuota =
+    (imageBatchQuota.get(projectId) ?? 0) > 0 || (videoBatchQuota.get(projectId) ?? 0) > 0
+  const liveWork = hasLiveGenerationWork(next)
+  if (
+    !liveWork &&
+    !hasBatchQuota &&
+    (next.pipelineStatus === 'running' || next.pipelineStatus === 'paused') &&
+    (nothingInFlight || cleared > 0)
+  ) {
+    // If statuses still say *_running but jobs are dead, clear them first.
+    if (!nothingInFlight) {
+      const forced = clearStaleRunningStatuses(next)
+      next = forced.pipeline
+    }
+    imageBatchQuota.delete(projectId)
+    videoBatchQuota.delete(projectId)
+    pausedProjects.delete(projectId)
+    next = { ...next, pipelineStatus: 'idle', activePhase: undefined }
+    changed = true
+    pipelineDebugLog(
+      projectId,
+      'warn',
+      'pump',
+      'Pipeline status reset to idle — no live jobs after reconcile'
+    )
+  }
+
+  if (!changed) return { project, pipeline }
+
+  if (cleared > 0) {
+    pipelineDebugLog(projectId, 'warn', 'pump', `Cleared ${cleared} stuck running segment(s)/anchor(s)`, {
+      cleared
+    })
+    await appendPipelineLog(projectId, 'Cleared stuck running statuses', { cleared })
+  }
+  if (next.pipelineStatus === 'idle' && pipeline.pipelineStatus !== 'idle') {
+    await appendPipelineLog(projectId, 'Pipeline returned to idle after reconcile')
+  }
+
   const saved = await persistPipeline(project, next)
   emit(projectId, next)
   return { project: saved, pipeline: next }
@@ -294,28 +521,132 @@ async function finishManualBatchIfIdle(
   const phase = pipeline.activePhase
   if (phase === 'images' && canStartNextImageBatch(pipeline)) {
     imageBatchQuota.delete(projectId)
-    const next = { ...pipeline, pipelineStatus: 'idle' as const, activePhase: undefined }
+
+    const prepared = prepareImageRetries(projectId, pipeline)
+    let next = prepared.pipeline
+
+    if (prepared.retrying > 0) {
+      pipelineDebugLog(projectId, 'step', 'image', `Retrying ${prepared.retrying} failed image(s)`, {
+        retrying: prepared.retrying,
+        exhausted: prepared.exhausted
+      })
+      await appendPipelineLog(projectId, 'Retrying failed segment images', {
+        retrying: prepared.retrying,
+        exhausted: prepared.exhausted
+      })
+    }
+
     if (allSegmentImagesComplete(next)) {
       pipelineDebugLog(projectId, 'step', 'pump', 'All images complete — ready for videos')
       await appendPipelineLog(projectId, 'All segment images complete')
-    } else {
-      pipelineDebugLog(projectId, 'step', 'pump', 'Image batch complete — generate next batch when ready')
-      await appendPipelineLog(projectId, 'Image batch complete')
+      imageAutoRetryCounts.delete(projectId)
+      return { ...next, pipelineStatus: 'idle', activePhase: undefined }
     }
-    return next
+
+    const pending = pendingImageEnqueueTargets(projectId, next)
+    if (pending.length > 0) {
+      const quota = Math.min(PIPELINE_BATCH_SIZE.segment_image, pending.length)
+      imageBatchQuota.set(projectId, quota)
+      pipelineDebugLog(projectId, 'step', 'pump', 'Auto-starting next image batch', {
+        pending: pending.length,
+        quota
+      })
+      await appendPipelineLog(projectId, 'Auto-starting next image batch', {
+        pending: pending.length,
+        quota
+      })
+      return { ...next, pipelineStatus: 'running', activePhase: 'images', lastError: undefined }
+    }
+
+    // Still waiting on character anchors (or similar) — stay running so pump continues when ready.
+    const waitingOnAnchors = next.segments.some(
+      (s) =>
+        !s.imageLocalPath &&
+        s.status !== 'failed' &&
+        s.status !== 'image_running' &&
+        !segmentImageReady(s.id, next)
+    )
+    if (waitingOnAnchors || anchorsInFlight(next)) {
+      pipelineDebugLog(projectId, 'info', 'pump', 'Image batch idle — waiting for character anchors')
+      return { ...next, pipelineStatus: 'running', activePhase: 'images' }
+    }
+
+    pipelineDebugLog(projectId, 'step', 'pump', 'Image batch complete — nothing left to enqueue')
+    await appendPipelineLog(projectId, 'Image batch complete')
+    return { ...next, pipelineStatus: 'idle', activePhase: undefined }
   }
 
   if (phase === 'videos' && canStartNextVideoBatch(pipeline)) {
     videoBatchQuota.delete(projectId)
-    if (allVideosDone(pipeline)) {
-      const allOk = pipeline.segments.every((s) => s.videoLocalPath || s.status === 'failed')
+
+    const prepared = prepareVideoRetries(projectId, pipeline)
+    let next = prepared.pipeline
+
+    if (prepared.retrying > 0) {
+      pipelineDebugLog(projectId, 'step', 'video', `Retrying ${prepared.retrying} failed video(s)`, {
+        retrying: prepared.retrying,
+        exhausted: prepared.exhausted
+      })
+      await appendPipelineLog(projectId, 'Retrying failed segment videos', {
+        retrying: prepared.retrying,
+        exhausted: prepared.exhausted
+      })
+    }
+
+    if (allVideosDone(next)) {
+      const allOk = next.segments.every((s) => s.videoLocalPath || s.status === 'failed')
       pipelineDebugLog(projectId, 'step', 'pump', 'All videos complete')
       await appendPipelineLog(projectId, 'Video generation complete')
-      return { ...pipeline, pipelineStatus: allOk ? 'complete' : 'failed', activePhase: undefined }
+      videoAutoRetryCounts.delete(projectId)
+      return { ...next, pipelineStatus: allOk ? 'complete' : 'failed', activePhase: undefined }
     }
-    pipelineDebugLog(projectId, 'step', 'pump', 'Video batch complete — generate next batch when ready')
+
+    const pending = pendingVideoEnqueueTargets(next)
+    if (pending.length > 0) {
+      const quota = Math.min(PIPELINE_BATCH_SIZE.segment_video, pending.length)
+      videoBatchQuota.set(projectId, quota)
+      pipelineDebugLog(projectId, 'step', 'pump', 'Auto-starting next video batch', {
+        pending: pending.length,
+        quota
+      })
+      await appendPipelineLog(projectId, 'Auto-starting next video batch', {
+        pending: pending.length,
+        quota
+      })
+      return { ...next, pipelineStatus: 'running', activePhase: 'videos', lastError: undefined }
+    }
+
+    const missingTiming = next.segments.filter(
+      (s) =>
+        s.imageLocalPath &&
+        !s.videoLocalPath &&
+        !s.scriptMatch &&
+        s.status !== 'failed' &&
+        s.status !== 'video_running'
+    ).length
+    if (missingTiming > 0) {
+      pipelineDebugLog(projectId, 'warn', 'pump', 'Videos paused — segments missing audio timings', {
+        missingTiming
+      })
+      return {
+        ...next,
+        pipelineStatus: 'idle',
+        activePhase: undefined,
+        lastError: `${missingTiming} segment(s) need audio timings before videos can continue.`
+      }
+    }
+
+    pipelineDebugLog(projectId, 'step', 'pump', 'Video batch complete — nothing left to enqueue')
     await appendPipelineLog(projectId, 'Video batch complete')
-    return { ...pipeline, pipelineStatus: 'idle', activePhase: undefined }
+    return { ...next, pipelineStatus: 'idle', activePhase: undefined }
+  }
+
+  // Orphaned "running" with no live work (including leftover quota that never enqueued).
+  if (!hasLiveGenerationWork(pipeline) && canStartNextImageBatch(pipeline) && canStartNextVideoBatch(pipeline)) {
+    imageBatchQuota.delete(projectId)
+    videoBatchQuota.delete(projectId)
+    const { pipeline: cleaned } = clearStaleRunningStatuses(pipeline)
+    return { ...cleaned, pipelineStatus: 'idle', activePhase: undefined }
   }
 
   return pipeline
@@ -400,7 +731,7 @@ async function enqueueSegmentImages(
 
   let quota = imageBatchQuota.get(projectId) ?? 0
   if (quota <= 0) {
-    pipelineDebugLog(projectId, 'info', 'image', 'No image batch quota — waiting for user to start next batch')
+    pipelineDebugLog(projectId, 'info', 'image', 'No image batch quota — waiting for next auto batch or user start')
     return next
   }
 
@@ -606,9 +937,6 @@ async function enqueueSegmentVideos(
         next,
         next.workspaceId ?? project.workspaceId
       )
-      const motion =
-        segment.videoMotionPrompt?.trim() ||
-        'Subtle natural motion, gentle camera movement, cinematic pacing.'
       pipelineDebugLog(projectId, 'prompt', 'video', `Enqueue segment ${segment.index + 1} video`, {
         segmentId: segment.id,
         model: request.model,
@@ -617,7 +945,7 @@ async function enqueueSegmentVideos(
         audioMatch: segment.scriptMatch
           ? `${segment.scriptMatch.startMs}–${segment.scriptMatch.endMs}ms`
           : null,
-        prompt: motion
+        prompt: request.prompt
       })
       const job = await enqueueJob(request)
       registerJob(job.id, { projectId, type: 'segment_video', segmentId: segment.id })
@@ -807,8 +1135,10 @@ async function beginPipelinePhase(
   pausedProjects.delete(projectId)
   if (phase === 'images') {
     imageBatchQuota.set(projectId, PIPELINE_BATCH_SIZE.segment_image)
+    imageAutoRetryCounts.delete(projectId)
   } else {
     videoBatchQuota.set(projectId, PIPELINE_BATCH_SIZE.segment_video)
+    videoAutoRetryCounts.delete(projectId)
   }
   pipeline = { ...pipeline, pipelineStatus: 'running', activePhase: phase, lastError: undefined }
   pipelineDebugLog(projectId, 'step', 'start', `Pipeline ${phase} phase started`, {
@@ -817,6 +1147,8 @@ async function beginPipelinePhase(
     imageModel: pipeline.imageModel,
     videoModel: pipeline.videoModel
   })
+  // Persist before pump, but emit only after enqueue so reconcile cannot wipe
+  // a fresh batch while nothing is in flight yet.
   await persistPipeline(project, pipeline)
   await appendPipelineLog(
     projectId,
@@ -824,10 +1156,11 @@ async function beginPipelinePhase(
       ? 'Pipeline videos phase started (timeline audio synced)'
       : 'Pipeline images phase started'
   )
-  emit(projectId, pipeline)
   await pump(projectId)
   const latest = await loadProjectPipeline(projectId)
-  return latest?.pipeline ?? pipeline
+  const result = latest?.pipeline ?? pipeline
+  emit(projectId, result)
+  return result
 }
 
 export async function startPipelineImages(
@@ -919,17 +1252,21 @@ export async function retrySegment(
 
   const segment = pipeline.segments[idx]
   if (stage === 'image' || stage === 'full') {
+    cancelTrackedJob(segment.imageJobId)
+    cancelTrackedJob(segment.videoJobId)
     pipeline.segments[idx] = {
       ...segment,
       status: 'pending',
       imageJobId: undefined,
       imageLocalPath: undefined,
+      pendingImageApproval: undefined,
       videoJobId: undefined,
       videoLocalPath: undefined,
       timelineClipId: undefined,
       error: undefined
     }
   } else if (stage === 'video') {
+    cancelTrackedJob(segment.videoJobId)
     pipeline.segments[idx] = {
       ...segment,
       status: 'image_done',
@@ -950,6 +1287,146 @@ export async function retrySegment(
   await persistPipeline(loaded.project, pipeline)
   emit(projectId, pipeline)
   await pump(projectId)
+  return pipeline
+}
+
+function cancelTrackedJob(jobId: string | undefined): void {
+  if (!jobId) return
+  releaseOrphanedJobMeta(jobId)
+  if (!cancelJob(jobId)) {
+    failJob(jobId, 'Cleared by user')
+  }
+}
+
+function dismissSegmentRunningState(
+  segment: SegmentPipelineState['segments'][number]
+): SegmentPipelineState['segments'][number] {
+  if (segment.status === 'image_running') {
+    cancelTrackedJob(segment.imageJobId)
+    if (segment.imageLocalPath) {
+      return {
+        ...segment,
+        status: 'image_done',
+        imageJobId: undefined,
+        error: undefined
+      }
+    }
+    return {
+      ...segment,
+      status: 'failed',
+      imageJobId: undefined,
+      error: 'Cleared stuck image generation'
+    }
+  }
+
+  if (segment.status === 'video_running') {
+    cancelTrackedJob(segment.videoJobId)
+    if (segment.videoLocalPath) {
+      return {
+        ...segment,
+        status: 'video_done',
+        videoJobId: undefined,
+        error: undefined
+      }
+    }
+    return {
+      ...segment,
+      status: segment.imageLocalPath ? 'image_done' : 'failed',
+      videoJobId: undefined,
+      error: 'Cleared stuck video generation'
+    }
+  }
+
+  return segment
+}
+
+/** Clear a stuck running segment so it no longer blocks the gallery/batch. */
+export async function dismissStuckSegment(
+  projectId: string,
+  segmentId: string
+): Promise<SegmentPipelineState> {
+  const loaded = await loadProjectPipeline(projectId)
+  if (!loaded) throw new Error('Project not found.')
+
+  let pipeline = {
+    ...loaded.pipeline,
+    segments: loaded.pipeline.segments.map((segment) =>
+      segment.id === segmentId ? dismissSegmentRunningState(segment) : segment
+    )
+  }
+
+  pipeline = await finishManualBatchIfIdle(projectId, pipeline)
+  await persistPipeline(loaded.project, pipeline)
+  emit(projectId, pipeline)
+  await appendPipelineLog(projectId, 'Dismissed stuck segment', { segmentId })
+  return pipeline
+}
+
+/** Clear a stuck character-anchor spinner. */
+export async function dismissStuckCharacter(
+  projectId: string,
+  characterId: string
+): Promise<SegmentPipelineState> {
+  const loaded = await loadProjectPipeline(projectId)
+  if (!loaded) throw new Error('Project not found.')
+
+  const pipeline = {
+    ...loaded.pipeline,
+    characters: loaded.pipeline.characters.map((character) => {
+      if (character.id !== characterId || character.anchorStatus !== 'running') return character
+      cancelTrackedJob(character.anchorImageJobId)
+      return {
+        ...character,
+        anchorStatus: character.anchorImagePath ? ('done' as const) : ('failed' as const),
+        anchorImageJobId: undefined
+      }
+    })
+  }
+
+  const finished = await finishManualBatchIfIdle(projectId, pipeline)
+  await persistPipeline(loaded.project, finished)
+  emit(projectId, finished)
+  await appendPipelineLog(projectId, 'Dismissed stuck character anchor', { characterId })
+  return finished
+}
+
+/** Clear every segment/character still marked running without a live job. */
+export async function dismissAllStuckRunning(
+  projectId: string
+): Promise<SegmentPipelineState> {
+  const loaded = await loadProjectPipeline(projectId)
+  if (!loaded) throw new Error('Project not found.')
+
+  let { project, pipeline } = loaded
+  const reconciled = await reconcileStaleRunning(projectId, project, pipeline)
+  project = reconciled.project
+  pipeline = reconciled.pipeline
+
+  // Also force-clear any remaining *_running (including hung live jobs).
+  let cleared = 0
+  const characters = pipeline.characters.map((character) => {
+    if (character.anchorStatus !== 'running') return character
+    cancelTrackedJob(character.anchorImageJobId)
+    cleared += 1
+    return {
+      ...character,
+      anchorStatus: character.anchorImagePath ? ('done' as const) : ('failed' as const),
+      anchorImageJobId: undefined
+    }
+  })
+  const segments = pipeline.segments.map((segment) => {
+    if (segment.status !== 'image_running' && segment.status !== 'video_running') return segment
+    cleared += 1
+    return dismissSegmentRunningState(segment)
+  })
+
+  pipeline = { ...pipeline, characters, segments }
+  pipeline = await finishManualBatchIfIdle(projectId, pipeline)
+  await persistPipeline(project, pipeline)
+  emit(projectId, pipeline)
+  if (cleared > 0) {
+    await appendPipelineLog(projectId, 'Dismissed all stuck running items', { cleared })
+  }
   return pipeline
 }
 
@@ -1032,19 +1509,23 @@ export async function handlePipelineJobUpdate(job: HiggsfieldGenerationJob): Pro
     } else if (meta.type === 'segment_image' && meta.segmentId) {
       const idx = pipeline.segments.findIndex((s) => s.id === meta.segmentId)
       if (idx >= 0) {
+        clearImageAutoRetry(meta.projectId, meta.segmentId)
         pipeline.segments[idx] = {
           ...pipeline.segments[idx],
           imageLocalPath: persistedPath,
-          status: 'image_done'
+          status: 'image_done',
+          error: undefined
         }
       }
     } else if (meta.type === 'segment_video' && meta.segmentId) {
       const idx = pipeline.segments.findIndex((s) => s.id === meta.segmentId)
       if (idx >= 0) {
+        clearVideoAutoRetry(meta.projectId, meta.segmentId)
         pipeline.segments[idx] = {
           ...pipeline.segments[idx],
           videoLocalPath: persistedPath,
-          status: 'video_done'
+          status: 'video_done',
+          error: undefined
         }
       }
     }
@@ -1087,18 +1568,47 @@ export async function handlePipelineJobUpdate(job: HiggsfieldGenerationJob): Pro
       if (idx >= 0) {
         const segment = pipeline.segments[idx]
         if (meta.type === 'segment_video' && segment.imageLocalPath) {
-          pipeline.segments[idx] = {
-            ...segment,
-            status: 'image_done',
-            videoJobId: undefined,
-            error: undefined
+          const attempts = bumpVideoAutoRetry(meta.projectId, segment.id)
+          if (attempts >= MAX_VIDEO_AUTO_RETRIES) {
+            pipeline.segments[idx] = {
+              ...segment,
+              status: 'failed',
+              videoJobId: undefined,
+              error: `${error} (stopped after ${MAX_VIDEO_AUTO_RETRIES} auto-retries)`
+            }
+          } else {
+            pipeline.segments[idx] = {
+              ...segment,
+              status: 'image_done',
+              videoJobId: undefined,
+              error: `${error} — auto-retry ${attempts}/${MAX_VIDEO_AUTO_RETRIES} after batch`
+            }
           }
-        } else if (meta.type === 'segment_image' && segment.imageLocalPath) {
-          pipeline.segments[idx] = {
-            ...segment,
-            status: 'image_done',
-            imageJobId: undefined,
-            error: undefined
+        } else if (meta.type === 'segment_image') {
+          const attempts = bumpImageAutoRetry(meta.projectId, segment.id)
+          if (segment.imageLocalPath) {
+            // Keep existing image; clear stuck running job.
+            clearImageAutoRetry(meta.projectId, segment.id)
+            pipeline.segments[idx] = {
+              ...segment,
+              status: 'image_done',
+              imageJobId: undefined,
+              error: undefined
+            }
+          } else if (attempts >= MAX_IMAGE_AUTO_RETRIES) {
+            pipeline.segments[idx] = {
+              ...segment,
+              status: 'failed',
+              imageJobId: undefined,
+              error: `${error} (stopped after ${MAX_IMAGE_AUTO_RETRIES} auto-retries)`
+            }
+          } else {
+            pipeline.segments[idx] = {
+              ...segment,
+              status: 'pending',
+              imageJobId: undefined,
+              error: `${error} — auto-retry ${attempts}/${MAX_IMAGE_AUTO_RETRIES} after batch`
+            }
           }
         } else {
           pipeline.segments[idx] = {
@@ -1126,12 +1636,33 @@ export async function handlePipelineJobUpdate(job: HiggsfieldGenerationJob): Pro
       await pump(meta.projectId)
       return
     }
+
     const loadedAfter = await loadProjectPipeline(meta.projectId)
     if (!loadedAfter) return
     let finished = await finishManualBatchIfIdle(meta.projectId, loadedAfter.pipeline)
-    if (finished.pipelineStatus !== loadedAfter.pipeline.pipelineStatus) {
+    const statusChanged =
+      finished.pipelineStatus !== loadedAfter.pipeline.pipelineStatus ||
+      finished.activePhase !== loadedAfter.pipeline.activePhase
+    const nextImageQuota = imageBatchQuota.get(meta.projectId) ?? 0
+    const nextVideoQuota = videoBatchQuota.get(meta.projectId) ?? 0
+    if (
+      statusChanged ||
+      (finished.activePhase === 'images' && nextImageQuota > 0) ||
+      (finished.activePhase === 'videos' && nextVideoQuota > 0)
+    ) {
       await persistPipeline(loadedAfter.project, finished)
       emit(meta.projectId, finished)
+    }
+
+    if (finished.pipelineStatus !== 'running' || pausedProjects.has(meta.projectId)) return
+
+    // Auto-continue image batches (and anchor waves) / video batches once the current wave is idle.
+    if (finished.activePhase === 'images') {
+      await pump(meta.projectId)
+      return
+    }
+    if (finished.activePhase === 'videos' && nextVideoQuota > 0) {
+      await pump(meta.projectId)
     }
   }
 }
