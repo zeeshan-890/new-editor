@@ -31,6 +31,7 @@ import type {
 } from '../shared/types'
 import type {
   LlmSettings,
+  AssemblyAiSettings,
   SegmentPipelineState
 } from '../shared/segmentPipeline'
 
@@ -123,6 +124,7 @@ export interface ElectronAPI {
   saveMediaManyAs: (payload: {
     items: Array<{ url?: string; localPath?: string; defaultName: string }>
   }) => Promise<{ dir: string | null; saved: number; failed: string[] }>
+  readClipboardImage: () => Promise<{ data: ArrayBuffer; fileName: string } | null>
   saveVideoEditorProject: (project: VideoEditorProject) => Promise<string | null>
   alignScriptAudio: (payload: {
     audioPath: string
@@ -132,6 +134,8 @@ export interface ElectronAPI {
   }) => Promise<import('../shared/types').ScriptAudioMatch>
   getLlmSettings: () => Promise<LlmSettings>
   saveLlmSettings: (settings: LlmSettings) => Promise<LlmSettings>
+  getAssemblyAiSettings: () => Promise<AssemblyAiSettings>
+  saveAssemblyAiSettings: (settings: AssemblyAiSettings) => Promise<AssemblyAiSettings>
   analyzeScript: (
     input: string | import('../shared/segmentPipeline').AnalyzeScriptInput
   ) => Promise<import('../shared/segmentPipeline').LlmAnalyzeResult>
@@ -176,6 +180,15 @@ export interface ElectronAPI {
     segmentId: string,
     stage: 'image' | 'video' | 'full'
   ) => Promise<SegmentPipelineState>
+  dismissStuckPipelineSegment: (
+    projectId: string,
+    segmentId: string
+  ) => Promise<SegmentPipelineState>
+  dismissStuckPipelineCharacter: (
+    projectId: string,
+    characterId: string
+  ) => Promise<SegmentPipelineState>
+  dismissAllStuckPipeline: (projectId: string) => Promise<SegmentPipelineState>
   markPipelineTimeline: (
     projectId: string,
     placements: Array<{ segmentId: string; clipId: string }>
@@ -271,10 +284,14 @@ const api: ElectronAPI = {
   exportVideoSequence: (payload) => ipcRenderer.invoke(IPC.VIDEO_EXPORT, payload),
   saveMediaAs: (payload) => ipcRenderer.invoke(IPC.MEDIA_SAVE_AS, payload),
   saveMediaManyAs: (payload) => ipcRenderer.invoke(IPC.MEDIA_SAVE_MANY, payload),
+  readClipboardImage: () => ipcRenderer.invoke(IPC.CLIPBOARD_READ_IMAGE),
   saveVideoEditorProject: (project) => ipcRenderer.invoke(IPC.VIDEO_EDITOR_PROJECT_SAVE, project),
   alignScriptAudio: (payload) => ipcRenderer.invoke(IPC.ALIGN_SCRIPT_AUDIO, payload),
   getLlmSettings: () => ipcRenderer.invoke(IPC.LLM_SETTINGS_GET),
   saveLlmSettings: (settings) => ipcRenderer.invoke(IPC.LLM_SETTINGS_SAVE, settings),
+  getAssemblyAiSettings: () => ipcRenderer.invoke(IPC.ASSEMBLYAI_SETTINGS_GET),
+  saveAssemblyAiSettings: (settings) =>
+    ipcRenderer.invoke(IPC.ASSEMBLYAI_SETTINGS_SAVE, settings),
   analyzeScript: (script) => ipcRenderer.invoke(IPC.LLM_ANALYZE_SCRIPT, script),
   applyPipelineAnalysis: (projectId, script, pipeline) =>
     ipcRenderer.invoke(IPC.PROJECT_APPLY_PIPELINE_ANALYSIS, { projectId, script, pipeline }),
@@ -302,6 +319,12 @@ const api: ElectronAPI = {
     ipcRenderer.invoke(IPC.PIPELINE_RESUME, { projectId, videoEditor, pipeline }),
   retryPipelineSegment: (projectId, segmentId, stage) =>
     ipcRenderer.invoke(IPC.PIPELINE_RETRY_SEGMENT, { projectId, segmentId, stage }),
+  dismissStuckPipelineSegment: (projectId, segmentId) =>
+    ipcRenderer.invoke(IPC.PIPELINE_DISMISS_STUCK_SEGMENT, { projectId, segmentId }),
+  dismissStuckPipelineCharacter: (projectId, characterId) =>
+    ipcRenderer.invoke(IPC.PIPELINE_DISMISS_STUCK_CHARACTER, { projectId, characterId }),
+  dismissAllStuckPipeline: (projectId) =>
+    ipcRenderer.invoke(IPC.PIPELINE_DISMISS_ALL_STUCK, projectId),
   markPipelineTimeline: (projectId, placements) =>
     ipcRenderer.invoke(IPC.PIPELINE_MARK_TIMELINE, { projectId, placements }),
   onPipelineUpdated: (callback) => {
