@@ -3,11 +3,11 @@ import type {
   LlmAnalyzeResult,
   LlmAnalyzeSegmentInput
 } from '../../shared/segmentPipeline'
-import type { ParsedScene } from './parseStructuredScript'
+import type { ParsedScene, ParsedSegmentBlock } from './parseStructuredScript'
 
 /** Keep only reference ids that exist on the project brief. Prefer the model's choices. */
 export function pickReferenceIdsForScene(
-  _scene: ParsedScene,
+  _scene: ParsedScene | ParsedSegmentBlock,
   references: AnalyzeScriptInput['references'] | undefined,
   existing?: string[]
 ): string[] {
@@ -127,4 +127,88 @@ export function buildDeterministicStructuredResult(
   }
 
   return finalizeStructuredSegments(draft, scenes, input)
+}
+
+function segmentFallbackMotion(block: ParsedSegmentBlock): string {
+  const prompt = block.imagePrompt.trim()
+  if (prompt) {
+    return `Animate with visible action matching: ${prompt.slice(0, 220)}. Camera slowly pushes in; natural body language and secondary motion (hands, fabric, face).`
+  }
+  return 'Visible subject motion and camera movement: natural body language, expressive face, secondary motion (hair, fabric, hands), and a slow cinematic push-in or orbit. Do not hold as a still frame.'
+}
+
+/**
+ * Lock Script + V0 Prompt from the deterministic parse.
+ * LLM may supply motion / characters / refs / style — never rewrites scriptText or imagePrompt.
+ */
+export function finalizeStructuredSegmentBlocks(
+  result: LlmAnalyzeResult,
+  blocks: ParsedSegmentBlock[],
+  input: AnalyzeScriptInput
+): LlmAnalyzeResult {
+  if (result.segments.length !== blocks.length) {
+    throw new Error(
+      `Structured analysis must return ${blocks.length} segments (one per Segment block), got ${result.segments.length}.`
+    )
+  }
+
+  const segments: LlmAnalyzeSegmentInput[] = result.segments
+    .slice()
+    .sort((a, b) => a.index - b.index)
+    .map((segment, index) => {
+      const block = blocks[index]
+      const referenceIds = pickReferenceIdsForScene(block, input.references, segment.referenceIds)
+      const imagePrompt =
+        sanitizeGeneratedPrompt(block.imagePrompt) || block.imagePrompt
+      let videoMotionPrompt = sanitizeGeneratedPrompt(segment.videoMotionPrompt ?? '')
+      if (!videoMotionPrompt) videoMotionPrompt = segmentFallbackMotion(block)
+      if (videoMotionPrompt.length > 360) {
+        videoMotionPrompt = videoMotionPrompt.slice(0, 360).replace(/\s+\S*$/, '')
+      }
+
+      return {
+        ...segment,
+        index,
+        scriptText: block.scriptText,
+        referenceIds: referenceIds.length ? referenceIds : undefined,
+        imagePrompt,
+        videoMotionPrompt
+      }
+    })
+
+  return { ...result, segments }
+}
+
+/** Last-resort segments from Segment/Script/V0 Prompt only. */
+export function buildDeterministicSegmentBlockResult(
+  blocks: ParsedSegmentBlock[],
+  input: AnalyzeScriptInput
+): LlmAnalyzeResult {
+  const draft: LlmAnalyzeResult = {
+    segments: blocks.map((block, index) => ({
+      index,
+      scriptText: block.scriptText,
+      imagePrompt: block.imagePrompt,
+      videoMotionPrompt: segmentFallbackMotion(block),
+      characters: ['woman'],
+      referenceIds: undefined,
+      continuityFromPrevious: index > 0
+    })),
+    characters: [
+      {
+        id: 'woman',
+        name: 'Woman',
+        role: 'protagonist',
+        description:
+          'Woman aged 50-60, natural features, everyday clothing, emotionally expressive face'
+      }
+    ],
+    styleLock: {
+      aspectRatio: '9:16',
+      visualStyle: 'cinematic realism, natural soft lighting',
+      setting: 'inferred from segment prompts'
+    }
+  }
+
+  return finalizeStructuredSegmentBlocks(draft, blocks, input)
 }
