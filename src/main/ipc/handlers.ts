@@ -1,6 +1,6 @@
 import { ipcMain, dialog, BrowserWindow, shell } from 'electron'
-import { promises as fs } from 'fs'
-import { join } from 'path'
+import { existsSync, promises as fs } from 'fs'
+import { basename, extname, join } from 'path'
 import { tmpdir } from 'os'
 import { app } from 'electron'
 import { IPC } from '../../shared/ipc-channels'
@@ -602,6 +602,84 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
         return result.filePath
       }
       return null
+    }
+  )
+
+  ipcMain.handle(
+    IPC.MEDIA_SAVE_MANY,
+    async (
+      _e,
+      payload: {
+        items: Array<{ url?: string; localPath?: string; defaultName: string }>
+      }
+    ): Promise<{ dir: string | null; saved: number; failed: string[] }> => {
+      const win = getWindow()
+      const parent = win && !win.isDestroyed() ? win : undefined
+      const properties: Array<'openDirectory' | 'createDirectory' | 'promptToCreate'> = [
+        'openDirectory'
+      ]
+      if (process.platform === 'darwin') properties.push('createDirectory')
+      if (process.platform === 'win32') properties.push('promptToCreate')
+
+      parent?.focus()
+      const dialogOpts = {
+        title: 'Choose folder for downloads',
+        buttonLabel: 'Download here',
+        properties
+      }
+      const pick = parent
+        ? await dialog.showOpenDialog(parent, dialogOpts)
+        : await dialog.showOpenDialog(dialogOpts)
+      if (pick.canceled || !pick.filePaths[0]) {
+        return { dir: null, saved: 0, failed: [] }
+      }
+
+      const dir = pick.filePaths[0]
+      const usedNames = new Set<string>()
+      const failed: string[] = []
+      let saved = 0
+
+      const uniquePath = (defaultName: string): string => {
+        const base = basename(defaultName) || 'generation.bin'
+        const ext = extname(base)
+        const stem = ext ? base.slice(0, -ext.length) : base
+        let candidate = base
+        let n = 1
+        while (usedNames.has(candidate.toLowerCase()) || existsSync(join(dir, candidate))) {
+          candidate = `${stem}-${n}${ext}`
+          n += 1
+        }
+        usedNames.add(candidate.toLowerCase())
+        return join(dir, candidate)
+      }
+
+      for (const item of payload.items) {
+        const name = item.defaultName || 'generation.bin'
+        try {
+          const dest = uniquePath(name)
+          if (item.localPath && existsSync(item.localPath)) {
+            await fs.copyFile(item.localPath, dest)
+            saved += 1
+            continue
+          }
+          if (item.url) {
+            const temp = await downloadMedia(item.url)
+            await fs.copyFile(temp, dest)
+            saved += 1
+            continue
+          }
+          failed.push(name)
+        } catch (err) {
+          failed.push(name)
+          logError(
+            'media:save-many',
+            err instanceof Error ? err.message : String(err),
+            { name }
+          )
+        }
+      }
+
+      return { dir, saved, failed }
     }
   )
 
