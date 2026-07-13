@@ -120,6 +120,9 @@ export interface ElectronAPI {
     localPath?: string
     defaultName: string
   }) => Promise<string | null>
+  saveMediaManyAs: (payload: {
+    items: Array<{ url?: string; localPath?: string; defaultName: string }>
+  }) => Promise<{ dir: string | null; saved: number; failed: string[] }>
   saveVideoEditorProject: (project: VideoEditorProject) => Promise<string | null>
   alignScriptAudio: (payload: {
     audioPath: string
@@ -267,6 +270,7 @@ const api: ElectronAPI = {
   getVideoFilmstrip: (payload) => ipcRenderer.invoke(IPC.VIDEO_FILMSTRIP, payload),
   exportVideoSequence: (payload) => ipcRenderer.invoke(IPC.VIDEO_EXPORT, payload),
   saveMediaAs: (payload) => ipcRenderer.invoke(IPC.MEDIA_SAVE_AS, payload),
+  saveMediaManyAs: (payload) => ipcRenderer.invoke(IPC.MEDIA_SAVE_MANY, payload),
   saveVideoEditorProject: (project) => ipcRenderer.invoke(IPC.VIDEO_EDITOR_PROJECT_SAVE, project),
   alignScriptAudio: (payload) => ipcRenderer.invoke(IPC.ALIGN_SCRIPT_AUDIO, payload),
   getLlmSettings: () => ipcRenderer.invoke(IPC.LLM_SETTINGS_GET),
