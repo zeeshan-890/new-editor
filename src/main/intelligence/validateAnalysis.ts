@@ -2,11 +2,11 @@ import type { LlmAnalyzeResult } from '../../shared/segmentPipeline'
 import { enforceExactScriptTexts } from '../alignment/exactScriptSegments'
 
 const MIN_SEGMENTS = 1
-const MAX_SEGMENTS = 80
+const MAX_SEGMENTS = 200
 
 export interface ValidateAnalysisOptions {
   fullScript?: string
-  /** When false, do not remap scriptText against the full document (used for Scene/VO scripts). */
+  /** When false, do not remap scriptText against the full document (used for Scene/VO and Segment/Script scripts). */
   enforceExactScript?: boolean
   expectedSegmentCount?: number
 }
@@ -22,6 +22,9 @@ export function parseLlmJsonResponse(raw: string): unknown {
 export function cleanNarrationScriptText(text: string): string {
   let cleaned = text.trim()
   cleaned = cleaned.replace(/^(?:Scene\s+\d+\s*[:.-]?\s*)+/i, '')
+  cleaned = cleaned.replace(/^(?:Segment\s+\d+\s*[:.-]?\s*)+/i, '')
+  cleaned = cleaned.replace(/^Script\s*:?\s*/i, '')
+  cleaned = cleaned.replace(/^(?:V0|VO)\s+Prompt\s*:?\s*/i, '')
   cleaned = cleaned.replace(/^VO\s*:\s*/i, '')
   cleaned = cleaned.replace(/^O\s*:\s*/i, '')
   cleaned = cleaned.replace(/^Clip\s+\d+\s*:?\s*/i, '')
@@ -32,7 +35,9 @@ export function cleanNarrationScriptText(text: string): string {
     cleaned = cleaned.slice(1, -1).trim()
   }
   // Drop trailing orphaned stage crumbs.
-  cleaned = cleaned.replace(/\s+(?:Clip\s+\d+|Scene\s+\d+)\s*:?\s*$/i, '').trim()
+  cleaned = cleaned
+    .replace(/\s+(?:Clip\s+\d+|Scene\s+\d+|Segment\s+\d+|Script|(?:V0|VO)\s+Prompt)\s*:?\s*$/i, '')
+    .trim()
   return cleaned.replace(/\s+/g, ' ').trim()
 }
 
@@ -64,7 +69,7 @@ export function validateAnalysisResult(
     segmentsRaw.length !== opts.expectedSegmentCount
   ) {
     throw new Error(
-      `Expected exactly ${opts.expectedSegmentCount} segments (one per Scene), got ${segmentsRaw.length}.`
+      `Expected exactly ${opts.expectedSegmentCount} segments (one per structured block), got ${segmentsRaw.length}.`
     )
   }
   if (!Array.isArray(charactersRaw)) {
