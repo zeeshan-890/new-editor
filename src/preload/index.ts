@@ -170,6 +170,7 @@ export interface ElectronAPI {
     pipeline?: SegmentPipelineState
   ) => Promise<SegmentPipelineState>
   pausePipeline: (projectId: string) => Promise<SegmentPipelineState>
+  stopPipeline: (projectId: string) => Promise<SegmentPipelineState>
   resumePipeline: (
     projectId: string,
     videoEditor?: VideoEditorProject,
@@ -315,6 +316,7 @@ const api: ElectronAPI = {
   startPipelineVideos: (projectId, videoEditor, pipeline) =>
     ipcRenderer.invoke(IPC.PIPELINE_START_VIDEOS, { projectId, videoEditor, pipeline }),
   pausePipeline: (projectId) => ipcRenderer.invoke(IPC.PIPELINE_PAUSE, projectId),
+  stopPipeline: (projectId) => ipcRenderer.invoke(IPC.PIPELINE_STOP, projectId),
   resumePipeline: (projectId, videoEditor, pipeline) =>
     ipcRenderer.invoke(IPC.PIPELINE_RESUME, { projectId, videoEditor, pipeline }),
   retryPipelineSegment: (projectId, segmentId, stage) =>
