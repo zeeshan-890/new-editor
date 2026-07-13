@@ -106,6 +106,24 @@ async function downloadGeneration(item: ProjectGeneration): Promise<void> {
   })
 }
 
+async function downloadGenerations(items: ProjectGeneration[]): Promise<{
+  dir: string | null
+  saved: number
+  failed: string[]
+}> {
+  if (items.length === 0) return { dir: null, saved: 0, failed: [] }
+  if (!window.electronAPI?.saveMediaManyAs) {
+    throw new Error('Batch download is unavailable. Fully restart the app (stop npm run dev and start again), then retry.')
+  }
+  return window.electronAPI.saveMediaManyAs({
+    items: items.map((item) => ({
+      url: item.localPath ? undefined : item.url,
+      localPath: item.localPath,
+      defaultName: defaultDownloadName(item)
+    }))
+  })
+}
+
 export function GenerationWorkspace({
   tabId,
   projectId
@@ -568,6 +586,20 @@ export function GenerationWorkspace({
 
   const handleGalleryDownload = useCallback((item: ProjectGeneration): void => {
     void downloadGeneration(item)
+  }, [])
+
+  const handleGalleryDownloadMany = useCallback(async (items: ProjectGeneration[]): Promise<void> => {
+    try {
+      const result = await downloadGenerations(items)
+      if (result.dir == null) return
+      if (result.failed.length > 0) {
+        window.alert(
+          `Saved ${result.saved} file(s). ${result.failed.length} failed.`
+        )
+      }
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err))
+    }
   }, [])
 
   const handleGalleryAddToEditor = useCallback(
@@ -1169,6 +1201,7 @@ export function GenerationWorkspace({
                 onPreview={openLightbox}
                 onLoadSettings={handleGalleryLoadSettings}
                 onDownload={handleGalleryDownload}
+                onDownloadMany={handleGalleryDownloadMany}
                 onAddToEditor={handleGalleryAddToEditor}
                 onApproveSegment={handleApproveSegmentImage}
               />
