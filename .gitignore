@@ -9,6 +9,27 @@ Thumbs.db
 test-audio.wav
 test-*.wav
 release
+release-build
+
+# Local secrets / env
+.env
+.env.*
+!.env.example
+
+# Whisper runtime (downloaded via npm run install:whisper)
 resources/whisper/*.bin
 resources/whisper/*.zip
+resources/whisper/Release/
+resources/whisper/_extract/
+resources/whisper/_extract2/
+
+# MFA / conda runtime (if installed locally)
 resources/mfa/
+
+# ONNX / ML model weights (keep README tracked)
+resources/models/*.onnx
+resources/models/*.ort
+resources/models/*.bin
+resources/models/*.pt
+resources/models/*.pth
+resources/models/*.safetensors
