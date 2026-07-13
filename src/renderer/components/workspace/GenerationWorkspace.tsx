@@ -5,6 +5,7 @@ import {
   LogIn,
   RefreshCw,
   Sparkles,
+  Trash2,
   Video,
   X,
   Scissors,
@@ -14,6 +15,8 @@ import { cn } from '@renderer/lib/utils'
 import {
   allowFileDrop,
   filePathFromDrop,
+  imageFilesFromClipboard,
+  imageFilesFromPasteEvent,
   imageFilesFromDataTransfer,
   isImageFile
 } from '@renderer/lib/dropFiles'
@@ -80,6 +83,7 @@ import {
   type ScriptSegment,
   resolvePendingSegmentJobId
 } from '@shared/segmentPipeline'
+import { findPipelineSegmentForGeneration } from '@shared/pipelineImageRefs'
 
 function isVideoUrl(url: string): boolean {
   return /\.(mp4|webm|mov)(\?|$)/i.test(url)
@@ -142,6 +146,7 @@ export function GenerationWorkspace({
   const updateProjectPipelineState = useProjectTabStore((s) => s.updateProjectPipelineState)
   const approveSegmentImage = useProjectTabStore((s) => s.approveSegmentImage)
   const discardPendingSegmentImage = useProjectTabStore((s) => s.discardPendingSegmentImage)
+  const deleteProjectGeneration = useProjectTabStore((s) => s.deleteProjectGeneration)
   const trackJob = useProjectTabStore((s) => s.trackJob)
   const pendingJobProjects = useProjectTabStore((s) => s.pendingJobProjects)
   const pendingJobConfigs = useProjectTabStore((s) => s.pendingJobConfigs)
@@ -354,11 +359,36 @@ export function GenerationWorkspace({
       setError('Drop a gallery image, file, or image link here.')
       return
     }
-
     for (const file of files) {
       await importImageFile(file, target)
       if (target === 'startFrame') break
     }
+  }
+
+  const onPasteImages = async (
+    e: React.ClipboardEvent,
+    target: 'attachments' | 'startFrame'
+  ): Promise<boolean> => {
+    const syncImages = imageFilesFromClipboard(e.clipboardData)
+    if (syncImages.length > 0) {
+      e.preventDefault()
+      for (const file of syncImages) {
+        await importImageFile(file, target)
+        if (target === 'startFrame') break
+      }
+      return true
+    }
+
+    // Electron clipboard fallback (Win screenshots sometimes skip DataTransfer files)
+    if (e.clipboardData.getData('text/plain')) return false
+    const images = await imageFilesFromPasteEvent(e.clipboardData)
+    if (images.length === 0) return false
+    e.preventDefault()
+    for (const file of images) {
+      await importImageFile(file, target)
+      if (target === 'startFrame') break
+    }
+    return true
   }
 
   const activeJobs = useMemo(
@@ -803,13 +833,17 @@ export function GenerationWorkspace({
             <textarea
               value={draft.prompt}
               onChange={(e) => patchDraft({ prompt: e.target.value })}
+              onPaste={(e) => {
+                if (mode === 'image') void onPasteImages(e, 'attachments')
+                else if (mode === 'video') void onPasteImages(e, 'startFrame')
+              }}
               rows={4}
               placeholder={
                 mode === 'image'
                   ? draft.imageAttachments.length >= 2
                     ? 'e.g. Combine #1 and #2: skeleton from #2 holding a plate with the brain from #1'
-                    : 'Describe the image you want…'
-                  : 'Describe the video motion and scene…'
+                    : 'Describe the image you want… Paste a screenshot to attach it.'
+                  : 'Describe the video motion and scene… Paste a screenshot for the start frame.'
               }
               className="w-full mt-1 rounded-md border border-border bg-card px-3 py-2 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-primary"
             />
@@ -830,6 +864,7 @@ export function GenerationWorkspace({
                     ? 'border-primary bg-primary/5'
                     : 'border-border'
                 )}
+                tabIndex={0}
                 onDragEnterCapture={() => setDragOverTarget('attachments')}
                 onDragLeaveCapture={(e) => {
                   if (e.currentTarget.contains(e.relatedTarget as Node)) return
@@ -837,6 +872,7 @@ export function GenerationWorkspace({
                 }}
                 onDragOverCapture={allowFileDrop}
                 onDropCapture={(e) => void onDropFiles(e, 'attachments')}
+                onPaste={(e) => void onPasteImages(e, 'attachments')}
               >
                 <div className="flex flex-wrap gap-2">
                   {draft.imageAttachments.map((media, index) => (
@@ -893,6 +929,9 @@ export function GenerationWorkspace({
                     <ImagePlus size={16} />
                   </button>
                 </div>
+                <p className="mt-1 text-[10px] text-muted">
+                  Drop, browse, or paste a screenshot (Ctrl+V) to attach.
+                </p>
                 <button
                   type="button"
                   className="mt-2 text-[10px] text-primary hover:underline"
@@ -927,6 +966,7 @@ export function GenerationWorkspace({
                       ? 'border-primary bg-primary/5'
                       : 'border-border'
                   )}
+                  tabIndex={0}
                   onDragEnterCapture={() => setDragOverTarget('startFrame')}
                   onDragLeaveCapture={(e) => {
                     if (e.currentTarget.contains(e.relatedTarget as Node)) return
@@ -934,6 +974,7 @@ export function GenerationWorkspace({
                   }}
                   onDragOverCapture={allowFileDrop}
                   onDropCapture={(e) => void onDropFiles(e, 'startFrame')}
+                  onPaste={(e) => void onPasteImages(e, 'startFrame')}
                 >
                   {draft.videoStartFrame ? (
                     <div className="relative h-24 w-full rounded overflow-hidden group">
@@ -1274,6 +1315,41 @@ export function GenerationWorkspace({
                 onClick={() => void downloadGeneration(lightboxItem)}
               >
                 <Download size={18} />
+              </button>
+              <button
+                type="button"
+                className="rounded-md p-1.5 text-white/85 hover:bg-white/10 hover:text-white"
+                title={lightboxIsVideo ? 'Retry video' : 'Retry image'}
+                onClick={() => {
+                  const segment = findPipelineSegmentForGeneration(pipeline, lightboxItem)
+                  if (!segment) {
+                    window.alert('This item is not linked to a pipeline segment.')
+                    return
+                  }
+                  closeLightbox()
+                  void retryPipelineSegment(
+                    projectId,
+                    segment.id,
+                    lightboxIsVideo ? 'video' : 'image'
+                  ).catch((err) => {
+                    window.alert(err instanceof Error ? err.message : String(err))
+                  })
+                }}
+              >
+                <RefreshCw size={18} />
+              </button>
+              <button
+                type="button"
+                className="rounded-md p-1.5 text-white/85 hover:bg-red-600/70 hover:text-white"
+                title="Delete from preview"
+                onClick={() => {
+                  const ok = window.confirm('Delete this item from the preview?')
+                  if (!ok) return
+                  deleteProjectGeneration(projectId, lightboxItem.id)
+                  closeLightbox()
+                }}
+              >
+                <Trash2 size={18} />
               </button>
               <button
                 type="button"
