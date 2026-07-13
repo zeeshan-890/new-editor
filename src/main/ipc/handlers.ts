@@ -83,6 +83,7 @@ import {
   handlePipelineJobUpdate,
   markSegmentsTimelinePlaced,
   pausePipeline,
+  stopPipeline,
   resumePipeline,
   retrySegment,
   dismissStuckSegment,
@@ -319,6 +320,8 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
   )
 
   ipcMain.handle(IPC.PIPELINE_PAUSE, async (_e, projectId: string) => pausePipeline(projectId))
+
+  ipcMain.handle(IPC.PIPELINE_STOP, async (_e, projectId: string) => stopPipeline(projectId))
 
   ipcMain.handle(
     IPC.PIPELINE_RESUME,
