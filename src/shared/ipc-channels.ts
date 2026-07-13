@@ -63,6 +63,7 @@ export const IPC = {
   PIPELINE_START_IMAGES: 'pipeline:start-images',
   PIPELINE_START_VIDEOS: 'pipeline:start-videos',
   PIPELINE_PAUSE: 'pipeline:pause',
+  PIPELINE_STOP: 'pipeline:stop',
   PIPELINE_RESUME: 'pipeline:resume',
   PIPELINE_RETRY_SEGMENT: 'pipeline:retry-segment',
   PIPELINE_DISMISS_STUCK_SEGMENT: 'pipeline:dismiss-stuck-segment',
