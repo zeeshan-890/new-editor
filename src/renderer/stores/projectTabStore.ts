@@ -15,17 +15,122 @@ import {
   createEmptyTabComposerState,
   APP_SESSION_VERSION,
   DEFAULT_IMAGE_MODEL,
+  DEFAULT_VIDEO_MODEL,
   generateId,
   generationToModeDraft,
   clampVideoDurationSeconds,
   normalizeTabComposerState
 } from '@shared/types'
 import { normalizeLoadedGenerationProject, normalizePipelineState } from '@shared/segmentPipeline'
-import { findPipelineSegmentForGeneration } from '@shared/pipelineImageRefs'
+import {
+  findPipelineSegmentForGeneration,
+  parseSegmentNumberFromPrompt
+} from '@shared/pipelineImageRefs'
 import type { SegmentPipelineState } from '@shared/segmentPipeline'
 import { isLegacyDefaultImageModel, shouldUseDefaultImageModel } from '@shared/imageModels'
+import { localMediaPathUrl } from '@renderer/lib/localFileProtocol'
 
 const saveTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function generationIsVideo(item: ProjectGeneration): boolean {
+  return item.type === 'video' || /\.(mp4|webm|mov)(\?|$)/i.test(item.url)
+}
+
+function isCharacterAnchorPrompt(prompt: string): boolean {
+  return prompt.trim().startsWith('Character anchor:')
+}
+
+/** Drop stale Segment N gallery items that no longer match pipeline media. */
+function pruneGenerationsForPipeline(
+  generations: ProjectGeneration[],
+  pipeline: SegmentPipelineState
+): ProjectGeneration[] {
+  const keepIds = new Set<string>()
+  for (const character of pipeline.characters) {
+    if (character.anchorImagePath && character.anchorImageJobId) {
+      keepIds.add(character.anchorImageJobId)
+    }
+  }
+  for (const segment of pipeline.segments) {
+    if (segment.imageLocalPath && segment.imageJobId) keepIds.add(segment.imageJobId)
+    if (segment.videoLocalPath && segment.videoJobId) keepIds.add(segment.videoJobId)
+    if (segment.pendingImageApproval?.jobId) keepIds.add(segment.pendingImageApproval.jobId)
+  }
+
+  return generations.filter((item) => {
+    if (keepIds.has(item.id)) return true
+
+    if (isCharacterAnchorPrompt(item.prompt)) {
+      const name = item.prompt.replace(/^Character anchor:\s*/i, '').trim()
+      const character = pipeline.characters.find(
+        (c) => c.name === name || c.anchorImageJobId === item.id
+      )
+      if (!character) return true
+      if (!character.anchorImagePath) return false
+      return character.anchorImagePath === item.localPath
+    }
+
+    const segmentNum = parseSegmentNumberFromPrompt(item.prompt)
+    if (segmentNum == null) return true
+    const segment = pipeline.segments.find((s) => s.index === segmentNum - 1)
+    if (!segment) return true
+
+    const isVideo = generationIsVideo(item)
+    if (isVideo) {
+      if (!segment.videoLocalPath) return false
+      if (segment.videoJobId && item.id === segment.videoJobId) return true
+      return segment.videoLocalPath === item.localPath
+    }
+
+    if (segment.pendingImageApproval?.jobId === item.id) return true
+    if (!segment.imageLocalPath) return false
+    if (segment.imageJobId && item.id === segment.imageJobId) return true
+    return segment.imageLocalPath === item.localPath
+  })
+}
+
+function upsertPipelineMediaGeneration(
+  generations: ProjectGeneration[],
+  pipeline: SegmentPipelineState
+): ProjectGeneration[] {
+  let next = [...generations]
+
+  for (const segment of pipeline.segments) {
+    if (!segment.imageLocalPath || !segment.imageJobId) continue
+    if (next.some((item) => item.id === segment.imageJobId)) continue
+    next = [
+      {
+        id: segment.imageJobId,
+        type: 'image',
+        prompt: `Segment ${segment.index + 1}: ${segment.scriptText}`,
+        model: pipeline.imageModel ?? DEFAULT_IMAGE_MODEL,
+        url: localMediaPathUrl(segment.imageLocalPath),
+        localPath: segment.imageLocalPath,
+        createdAt: Date.now()
+      },
+      ...next
+    ]
+  }
+
+  for (const segment of pipeline.segments) {
+    if (!segment.videoLocalPath || !segment.videoJobId) continue
+    if (next.some((item) => item.id === segment.videoJobId)) continue
+    next = [
+      {
+        id: segment.videoJobId,
+        type: 'video',
+        prompt: `Segment ${segment.index + 1}: ${segment.scriptText}`,
+        model: pipeline.videoModel ?? DEFAULT_VIDEO_MODEL,
+        url: localMediaPathUrl(segment.videoLocalPath),
+        localPath: segment.videoLocalPath,
+        createdAt: Date.now()
+      },
+      ...next
+    ]
+  }
+
+  return next
+}
 
 function scheduleProjectSave(projectId: string, get: () => { projects: Record<string, GenerationProject> }): void {
   const existing = saveTimers.get(projectId)
@@ -142,6 +247,7 @@ export const useProjectTabStore = create<{
   approveSegmentImage: (projectId: string, segmentId: string) => void
   discardPendingSegmentImage: (projectId: string, segmentId: string) => void
   addProjectGeneration: (projectId: string, generation: ProjectGeneration) => void
+  deleteProjectGeneration: (projectId: string, generationId: string) => void
   linkEditorAudioToProject: (
     projectId: string,
     payload: {
@@ -496,11 +602,20 @@ export const useProjectTabStore = create<{
     set((state) => {
       const current = state.projects[projectId]
       if (!current) return state
+      const generations = pruneGenerationsForPipeline(
+        upsertPipelineMediaGeneration(current.generations, normalized),
+        normalized
+      )
       scheduleProjectSave(projectId, get)
       return {
         projects: {
           ...state.projects,
-          [projectId]: { ...current, pipeline: normalized, updatedAt: Date.now() }
+          [projectId]: {
+            ...current,
+            pipeline: normalized,
+            generations,
+            updatedAt: Date.now()
+          }
         }
       }
     })
@@ -882,15 +997,210 @@ export const useProjectTabStore = create<{
     set((state) => {
       const current = state.projects[projectId]
       if (!current) return state
+      const segmentNum = parseSegmentNumberFromPrompt(generation.prompt)
+      const isVideo = generationIsVideo(generation)
+      const generations = [
+        generation,
+        ...current.generations.filter((item) => {
+          if (item.id === generation.id) return false
+          if (segmentNum == null) return true
+          if (parseSegmentNumberFromPrompt(item.prompt) !== segmentNum) return true
+          return generationIsVideo(item) !== isVideo
+        })
+      ]
       const updated = {
         ...current,
-        generations: [generation, ...current.generations],
+        generations,
         updatedAt: Date.now()
       }
       scheduleProjectSave(projectId, get)
       return { projects: { ...state.projects, [projectId]: updated } }
     })
     void get().refreshProjectList()
+  },
+
+  deleteProjectGeneration: (projectId, generationId) => {
+    set((state) => {
+      const project = state.projects[projectId]
+      if (!project) return state
+
+      const pipeline = project.pipeline ? normalizePipelineState(project.pipeline) : null
+      let generation = project.generations.find((item) => item.id === generationId)
+
+      if (!generation && pipeline) {
+        for (const segment of pipeline.segments) {
+          if (
+            generationId === `${segment.id}-image` ||
+            (segment.imageJobId === generationId && segment.imageLocalPath)
+          ) {
+            generation = {
+              id: generationId,
+              type: 'image',
+              prompt: `Segment ${segment.index + 1}: ${segment.scriptText}`,
+              model: pipeline.imageModel ?? DEFAULT_IMAGE_MODEL,
+              url: segment.imageLocalPath
+                ? localMediaPathUrl(segment.imageLocalPath)
+                : '',
+              localPath: segment.imageLocalPath,
+              createdAt: Date.now()
+            }
+            break
+          }
+          if (
+            generationId === `${segment.id}-video` ||
+            (segment.videoJobId === generationId && segment.videoLocalPath)
+          ) {
+            generation = {
+              id: generationId,
+              type: 'video',
+              prompt: `Segment ${segment.index + 1}: ${segment.scriptText}`,
+              model: pipeline.videoModel ?? DEFAULT_VIDEO_MODEL,
+              url: segment.videoLocalPath
+                ? localMediaPathUrl(segment.videoLocalPath)
+                : '',
+              localPath: segment.videoLocalPath,
+              createdAt: Date.now()
+            }
+            break
+          }
+        }
+        if (!generation) {
+          for (const character of pipeline.characters) {
+            if (
+              character.anchorImageJobId === generationId ||
+              generationId === `character-${character.id}`
+            ) {
+              if (!character.anchorImagePath) break
+              generation = {
+                id: generationId,
+                type: 'image',
+                prompt: `Character anchor: ${character.name}`,
+                model: pipeline.imageModel ?? DEFAULT_IMAGE_MODEL,
+                url: localMediaPathUrl(character.anchorImagePath),
+                localPath: character.anchorImagePath,
+                createdAt: Date.now()
+              }
+              break
+            }
+          }
+        }
+      }
+
+      if (!generation) {
+        const generations = project.generations.filter((item) => item.id !== generationId)
+        if (generations.length === project.generations.length) return state
+        scheduleProjectSave(projectId, get)
+        return {
+          projects: {
+            ...state.projects,
+            [projectId]: { ...project, generations, updatedAt: Date.now() }
+          }
+        }
+      }
+
+      let nextPipeline = pipeline
+      const segmentNum = parseSegmentNumberFromPrompt(generation.prompt)
+      const isVideo = generationIsVideo(generation)
+
+      if (nextPipeline) {
+        const segment = findPipelineSegmentForGeneration(nextPipeline, generation)
+        if (segment) {
+          nextPipeline = {
+            ...nextPipeline,
+            segments: nextPipeline.segments.map((s) => {
+              if (s.id !== segment.id) return s
+              if (isVideo) {
+                return {
+                  ...s,
+                  videoLocalPath: undefined,
+                  videoJobId: undefined,
+                  timelineClipId: undefined,
+                  status: s.imageLocalPath ? ('image_done' as const) : ('pending' as const),
+                  error: undefined
+                }
+              }
+              return {
+                ...s,
+                imageLocalPath: undefined,
+                imageJobId: undefined,
+                pendingImageApproval: undefined,
+                videoLocalPath: undefined,
+                videoJobId: undefined,
+                timelineClipId: undefined,
+                status: 'pending' as const,
+                error: undefined
+              }
+            })
+          }
+        } else if (isCharacterAnchorPrompt(generation.prompt)) {
+          const name = generation.prompt.replace(/^Character anchor:\s*/i, '').trim()
+          nextPipeline = {
+            ...nextPipeline,
+            characters: nextPipeline.characters.map((character) => {
+              if (
+                character.anchorImageJobId !== generation.id &&
+                character.name !== name &&
+                `character-${character.id}` !== generation.id
+              ) {
+                return character
+              }
+              return {
+                ...character,
+                anchorImagePath: undefined,
+                anchorImageJobId: undefined,
+                anchorStatus: 'pending' as const
+              }
+            })
+          }
+        }
+      }
+
+      const generations = project.generations.filter((item) => {
+        if (item.id === generation.id) return false
+        if (segmentNum == null) return true
+        if (parseSegmentNumberFromPrompt(item.prompt) !== segmentNum) return true
+        return generationIsVideo(item) !== isVideo
+      })
+
+      const tabDrafts = { ...state.tabDrafts }
+      for (const tab of state.tabs) {
+        if (tab.kind !== 'generation' || tab.projectId !== projectId) continue
+        const draft = tabDrafts[tab.id]
+        if (!draft) continue
+        const clearRegen =
+          Boolean(draft.regenerateSegmentId) &&
+          Boolean(
+            nextPipeline?.segments.some(
+              (s) => s.id === draft.regenerateSegmentId && !s.imageLocalPath && !isVideo
+            )
+          )
+        tabDrafts[tab.id] = normalizeTabComposerState({
+          ...draft,
+          selectedGenerationId:
+            draft.selectedGenerationId === generation.id ? null : draft.selectedGenerationId,
+          regenerateSegmentId: clearRegen ? null : draft.regenerateSegmentId
+        })
+      }
+
+      const nextProject = {
+        ...project,
+        generations,
+        pipeline: nextPipeline ?? project.pipeline,
+        updatedAt: Date.now()
+      }
+      scheduleProjectSave(projectId, get)
+      scheduleSessionSave(get, state.tabs, state.activeTabId, tabDrafts)
+      return {
+        projects: { ...state.projects, [projectId]: nextProject },
+        tabDrafts
+      }
+    })
+    void get().refreshProjectList()
+
+    const project = get().projects[projectId]
+    if (project?.pipeline && window.electronAPI?.updateProjectPipeline) {
+      void window.electronAPI.updateProjectPipeline(projectId, project.pipeline)
+    }
   },
 
   linkEditorAudioToProject: (projectId, payload) => {

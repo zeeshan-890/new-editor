@@ -4,9 +4,12 @@ import {
   Clock,
   Download,
   Loader2,
+  RefreshCw,
   Scissors,
   Square,
-  Sparkles
+  Sparkles,
+  Trash2,
+  X
 } from 'lucide-react'
 import { cn } from '@renderer/lib/utils'
 import { Button } from '../common/Button'
@@ -24,6 +27,10 @@ import type {
   ProjectGeneration
 } from '@shared/types'
 import { imageModelShortLabel } from '@shared/imageModels'
+import { usePipelineStore } from '@renderer/stores/pipelineStore'
+import { useProjectTabStore } from '@renderer/stores/projectTabStore'
+import { findPipelineSegmentForGeneration } from '@shared/pipelineImageRefs'
+import { normalizePipelineState } from '@shared/segmentPipeline'
 import { LazyGalleryMedia } from './LazyGalleryMedia'
 import { GalleryVirtualScroll } from './GalleryVirtualScroll'
 
@@ -63,7 +70,9 @@ const MemoGalleryTile = memo(function GalleryTile({
   onLoadSettings,
   onDownload,
   onAddToEditor,
-  onToggleSelect
+  onToggleSelect,
+  onDelete,
+  onRetry
 }: {
   item: ProjectGeneration
   indexLabel: string
@@ -74,6 +83,8 @@ const MemoGalleryTile = memo(function GalleryTile({
   onDownload: (item: ProjectGeneration) => void
   onAddToEditor: (item: ProjectGeneration) => void
   onToggleSelect: (item: ProjectGeneration) => void
+  onDelete: (item: ProjectGeneration) => void
+  onRetry?: (item: ProjectGeneration) => void
 }): React.JSX.Element {
   const isVideo = item.type === 'video' || isVideoUrl(item.url)
   const mediaSrc = generationVideoSrc(item)
@@ -102,7 +113,7 @@ const MemoGalleryTile = memo(function GalleryTile({
         type="button"
         className={cn(
           'absolute top-2 left-2 z-10 rounded bg-black/55 p-1 hover:bg-black/75',
-          checked || 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'
+          !checked && 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'
         )}
         title={checked ? 'Deselect' : 'Select for download'}
         onClick={(e) => {
@@ -135,6 +146,19 @@ const MemoGalleryTile = memo(function GalleryTile({
       </div>
 
       <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100">
+        {onRetry && (
+          <button
+            type="button"
+            className="rounded-full bg-black/50 p-1 hover:bg-black/70"
+            title={isVideo ? 'Retry video' : 'Retry image'}
+            onClick={(e) => {
+              e.stopPropagation()
+              onRetry(item)
+            }}
+          >
+            <RefreshCw size={12} className="text-white" />
+          </button>
+        )}
         <button
           type="button"
           className="rounded-full bg-black/50 p-1 hover:bg-black/70"
@@ -167,6 +191,17 @@ const MemoGalleryTile = memo(function GalleryTile({
           }}
         >
           <Download size={12} className="text-white" />
+        </button>
+        <button
+          type="button"
+          className="rounded-full bg-black/50 p-1 hover:bg-red-600/80"
+          title="Delete from preview"
+          onClick={(e) => {
+            e.stopPropagation()
+            onDelete(item)
+          }}
+        >
+          <Trash2 size={12} className="text-white" />
         </button>
       </div>
 
@@ -227,30 +262,92 @@ const MemoPendingJobTile = memo(function PendingJobTile({
 })
 
 const MemoPipelineSegmentProgressTile = memo(function PipelineSegmentProgressTile({
-  segment
+  segment,
+  onClear,
+  onRetry
 }: {
   segment: ScriptSegment
+  onClear: (segmentId: string) => void
+  onRetry: (segmentId: string, stage: 'image' | 'video') => void
 }): React.JSX.Element {
+  const stage = segment.status === 'video_running' ? 'video' : 'image'
   return (
     <div className="relative aspect-square rounded-lg border border-primary/40 overflow-hidden bg-card">
       <div className="flex h-full w-full flex-col items-center justify-center gap-2 p-3">
         <Loader2 size={24} className="animate-spin text-primary" />
         <span className="text-[10px] text-muted">Segment {segment.index + 1}</span>
+        <span className="text-[9px] text-muted/80 text-center">
+          Stuck? Clear or retry below.
+        </span>
+        <div className="flex gap-1 mt-1">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 px-2 text-[10px]"
+            onClick={(e) => {
+              e.stopPropagation()
+              onClear(segment.id)
+            }}
+          >
+            <X size={12} className="mr-1" />
+            Clear
+          </Button>
+          <Button
+            size="sm"
+            className="h-7 px-2 text-[10px]"
+            onClick={(e) => {
+              e.stopPropagation()
+              onRetry(segment.id, stage)
+            }}
+          >
+            <RefreshCw size={12} className="mr-1" />
+            Retry
+          </Button>
+        </div>
       </div>
     </div>
   )
 })
 
 const MemoPipelineCharacterProgressTile = memo(function PipelineCharacterProgressTile({
-  character
+  character,
+  onClear,
+  onRetry
 }: {
   character: CharacterProfile
+  onClear: (characterId: string) => void
+  onRetry: (characterId: string) => void
 }): React.JSX.Element {
   return (
     <div className="relative aspect-square rounded-lg border border-primary/40 overflow-hidden bg-card">
       <div className="flex h-full w-full flex-col items-center justify-center gap-2 p-3">
         <Loader2 size={24} className="animate-spin text-primary" />
         <span className="text-[10px] text-muted">{character.name}</span>
+        <div className="flex gap-1 mt-1">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 px-2 text-[10px]"
+            onClick={(e) => {
+              e.stopPropagation()
+              onClear(character.id)
+            }}
+          >
+            <X size={12} className="mr-1" />
+            Clear
+          </Button>
+          <Button
+            size="sm"
+            className="h-7 px-2 text-[10px]"
+            onClick={(e) => {
+              e.stopPropagation()
+              onRetry(character.id)
+            }}
+          >
+            <RefreshCw size={12} className="mr-1" />
+            Retry
+          </Button>
+        </div>
       </div>
     </div>
   )
@@ -307,7 +404,13 @@ const MemoGalleryEntryTile = memo(function GalleryEntryTile({
   onDownload,
   onAddToEditor,
   onApproveSegment,
-  onToggleSelect
+  onToggleSelect,
+  onDelete,
+  onRetryGeneration,
+  onClearStuckSegment,
+  onRetryStuckSegment,
+  onClearStuckCharacter,
+  onRetryStuckCharacter
 }: {
   entry: GalleryEntry
   selectedGenerationId?: string | null
@@ -318,14 +421,32 @@ const MemoGalleryEntryTile = memo(function GalleryEntryTile({
   onAddToEditor: (item: ProjectGeneration) => void
   onApproveSegment: (segmentId: string) => void
   onToggleSelect: (item: ProjectGeneration) => void
+  onDelete: (item: ProjectGeneration) => void
+  onRetryGeneration: (item: ProjectGeneration) => void
+  onClearStuckSegment: (segmentId: string) => void
+  onRetryStuckSegment: (segmentId: string, stage: 'image' | 'video') => void
+  onClearStuckCharacter: (characterId: string) => void
+  onRetryStuckCharacter: (characterId: string) => void
 }): React.JSX.Element {
   switch (entry.kind) {
     case 'pending-job':
       return <MemoPendingJobTile job={entry.job} config={entry.config} />
     case 'segment-running':
-      return <MemoPipelineSegmentProgressTile segment={entry.segment} />
+      return (
+        <MemoPipelineSegmentProgressTile
+          segment={entry.segment}
+          onClear={onClearStuckSegment}
+          onRetry={onRetryStuckSegment}
+        />
+      )
     case 'character-running':
-      return <MemoPipelineCharacterProgressTile character={entry.character} />
+      return (
+        <MemoPipelineCharacterProgressTile
+          character={entry.character}
+          onClear={onClearStuckCharacter}
+          onRetry={onRetryStuckCharacter}
+        />
+      )
     case 'segment-pending-approval':
       return (
         <MemoPendingSegmentApprovalTile
@@ -347,6 +468,8 @@ const MemoGalleryEntryTile = memo(function GalleryEntryTile({
           onDownload={onDownload}
           onAddToEditor={onAddToEditor}
           onToggleSelect={onToggleSelect}
+          onDelete={onDelete}
+          onRetry={onRetryGeneration}
         />
       )
     default:
@@ -376,6 +499,14 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
   const { gallerySections, galleryCounts } = useProjectGallery(projectId)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [downloading, setDownloading] = useState(false)
+  const [clearingStuck, setClearingStuck] = useState(false)
+
+  const dismissStuckSegment = usePipelineStore((s) => s.dismissStuckSegment)
+  const dismissStuckCharacter = usePipelineStore((s) => s.dismissStuckCharacter)
+  const dismissAllStuck = usePipelineStore((s) => s.dismissAllStuck)
+  const retrySegment = usePipelineStore((s) => s.retrySegment)
+  const startPipelineImages = usePipelineStore((s) => s.startPipelineImages)
+  const deleteProjectGeneration = useProjectTabStore((s) => s.deleteProjectGeneration)
 
   useEffect(() => {
     setSelectedIds(new Set())
@@ -385,6 +516,14 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
     () => flattenGalleryGenerations(gallerySections),
     [gallerySections]
   )
+
+  const stuckCount = useMemo(() => {
+    return (
+      gallerySections.characters.filter((e) => e.kind === 'character-running').length +
+      gallerySections.images.filter((e) => e.kind === 'segment-running').length +
+      gallerySections.clips.filter((e) => e.kind === 'segment-running').length
+    )
+  }, [gallerySections])
 
   const sections = useMemo(
     () => [
@@ -424,6 +563,99 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
     }
   }, [downloadableItems, onDownloadMany, selectedIds])
 
+  const handleClearStuckSegment = useCallback(
+    (segmentId: string) => {
+      void dismissStuckSegment(projectId, segmentId).catch((err) => {
+        window.alert(err instanceof Error ? err.message : String(err))
+      })
+    },
+    [dismissStuckSegment, projectId]
+  )
+
+  const handleRetryStuckSegment = useCallback(
+    (segmentId: string, stage: 'image' | 'video') => {
+      void (async () => {
+        try {
+          await dismissStuckSegment(projectId, segmentId)
+          await retrySegment(projectId, segmentId, stage)
+        } catch (err) {
+          window.alert(err instanceof Error ? err.message : String(err))
+        }
+      })()
+    },
+    [dismissStuckSegment, projectId, retrySegment]
+  )
+
+  const handleClearStuckCharacter = useCallback(
+    (characterId: string) => {
+      void dismissStuckCharacter(projectId, characterId).catch((err) => {
+        window.alert(err instanceof Error ? err.message : String(err))
+      })
+    },
+    [dismissStuckCharacter, projectId]
+  )
+
+  const handleRetryStuckCharacter = useCallback(
+    (characterId: string) => {
+      void (async () => {
+        try {
+          await dismissStuckCharacter(projectId, characterId)
+          await startPipelineImages(projectId)
+        } catch (err) {
+          window.alert(err instanceof Error ? err.message : String(err))
+        }
+      })()
+    },
+    [dismissStuckCharacter, projectId, startPipelineImages]
+  )
+
+  const handleClearAllStuck = useCallback(() => {
+    setClearingStuck(true)
+    void dismissAllStuck(projectId)
+      .catch((err) => {
+        window.alert(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => setClearingStuck(false))
+  }, [dismissAllStuck, projectId])
+
+  const handleDeleteGeneration = useCallback(
+    (item: ProjectGeneration) => {
+      const ok = window.confirm('Delete this item from the preview?')
+      if (!ok) return
+      deleteProjectGeneration(projectId, item.id)
+      setSelectedIds((prev) => {
+        if (!prev.has(item.id)) return prev
+        const next = new Set(prev)
+        next.delete(item.id)
+        return next
+      })
+    },
+    [deleteProjectGeneration, projectId]
+  )
+
+  const handleRetryGeneration = useCallback(
+    (item: ProjectGeneration) => {
+      const project = useProjectTabStore.getState().projects[projectId]
+      const pipeline = project?.pipeline
+        ? normalizePipelineState(project.pipeline)
+        : null
+      if (!pipeline) {
+        window.alert('Pipeline is not available for this project.')
+        return
+      }
+      const segment = findPipelineSegmentForGeneration(pipeline, item)
+      if (!segment) {
+        window.alert('This item is not linked to a pipeline segment.')
+        return
+      }
+      const stage = item.type === 'video' || isVideoUrl(item.url) ? 'video' : 'image'
+      void retrySegment(projectId, segment.id, stage).catch((err) => {
+        window.alert(err instanceof Error ? err.message : String(err))
+      })
+    },
+    [projectId, retrySegment]
+  )
+
   const renderTile = useCallback(
     (entry: GalleryEntry) => (
       <MemoGalleryEntryTile
@@ -436,6 +668,12 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
         onAddToEditor={onAddToEditor}
         onApproveSegment={onApproveSegment}
         onToggleSelect={handleToggleSelect}
+        onDelete={handleDeleteGeneration}
+        onRetryGeneration={handleRetryGeneration}
+        onClearStuckSegment={handleClearStuckSegment}
+        onRetryStuckSegment={handleRetryStuckSegment}
+        onClearStuckCharacter={handleClearStuckCharacter}
+        onRetryStuckCharacter={handleRetryStuckCharacter}
       />
     ),
     [
@@ -446,7 +684,13 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
       onDownload,
       onAddToEditor,
       onApproveSegment,
-      handleToggleSelect
+      handleToggleSelect,
+      handleDeleteGeneration,
+      handleRetryGeneration,
+      handleClearStuckSegment,
+      handleRetryStuckSegment,
+      handleClearStuckCharacter,
+      handleRetryStuckCharacter
     ]
   )
 
@@ -495,6 +739,22 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
               Download selected ({selectedCount})
             </Button>
           </>
+        )}
+        {stuckCount > 0 && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={handleClearAllStuck}
+            disabled={clearingStuck}
+            title="Remove stuck generating tiles that are blocking the gallery"
+          >
+            {clearingStuck ? (
+              <Loader2 size={14} className="mr-1 animate-spin" />
+            ) : (
+              <X size={14} className="mr-1" />
+            )}
+            Clear stuck ({stuckCount})
+          </Button>
         )}
         <span className="text-[10px] text-muted">
           Hover a card and click the checkbox to multi-select
