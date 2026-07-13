@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type {
   LlmSettings,
+  AssemblyAiSettings,
   SegmentPipelineState,
   ScriptSegment
 } from '@shared/segmentPipeline'
@@ -193,6 +194,7 @@ async function persistPipelineToProject(
 
 export const usePipelineStore = create<{
   llmSettings: LlmSettings | null
+  assemblyAiSettings: AssemblyAiSettings | null
   analyzing: boolean
   pipelineRunning: boolean
   assembling: boolean
@@ -202,6 +204,8 @@ export const usePipelineStore = create<{
 
   loadLlmSettings: () => Promise<void>
   saveLlmSettings: (settings: LlmSettings) => Promise<void>
+  loadAssemblyAiSettings: () => Promise<void>
+  saveAssemblyAiSettings: (settings: AssemblyAiSettings) => Promise<void>
   analyzeAndApplyScript: (
     projectId: string,
     script: string,
@@ -220,6 +224,9 @@ export const usePipelineStore = create<{
     segmentId: string,
     stage: 'image' | 'video' | 'full'
   ) => Promise<void>
+  dismissStuckSegment: (projectId: string, segmentId: string) => Promise<void>
+  dismissStuckCharacter: (projectId: string, characterId: string) => Promise<void>
+  dismissAllStuck: (projectId: string) => Promise<void>
   syncTimelineAudio: (projectId: string) => Promise<void>
   matchSegmentTimings: (projectId: string) => Promise<void>
   assembleTimeline: (projectId: string) => Promise<void>
@@ -227,6 +234,7 @@ export const usePipelineStore = create<{
   initSubscriptions: () => () => void
 }>((set, get) => ({
   llmSettings: null,
+  assemblyAiSettings: null,
   analyzing: false,
   pipelineRunning: false,
   assembling: false,
@@ -244,6 +252,18 @@ export const usePipelineStore = create<{
     if (!window.electronAPI?.saveLlmSettings) return
     const saved = await window.electronAPI.saveLlmSettings(settings)
     set({ llmSettings: saved })
+  },
+
+  loadAssemblyAiSettings: async () => {
+    if (!window.electronAPI?.getAssemblyAiSettings) return
+    const settings = await window.electronAPI.getAssemblyAiSettings()
+    set({ assemblyAiSettings: settings })
+  },
+
+  saveAssemblyAiSettings: async (settings) => {
+    if (!window.electronAPI?.saveAssemblyAiSettings) return
+    const saved = await window.electronAPI.saveAssemblyAiSettings(settings)
+    set({ assemblyAiSettings: saved })
   },
 
   analyzeAndApplyScript: async (projectId, script, brief) => {
@@ -395,6 +415,30 @@ export const usePipelineStore = create<{
       set({ lastError: message })
       throw err
     }
+  },
+
+  dismissStuckSegment: async (projectId, segmentId) => {
+    if (!window.electronAPI?.dismissStuckPipelineSegment) {
+      throw new Error('Clear stuck is unavailable. Restart the Electron app (npm run dev).')
+    }
+    const pipeline = await window.electronAPI.dismissStuckPipelineSegment(projectId, segmentId)
+    get().handlePipelineUpdated(projectId, pipeline)
+  },
+
+  dismissStuckCharacter: async (projectId, characterId) => {
+    if (!window.electronAPI?.dismissStuckPipelineCharacter) {
+      throw new Error('Clear stuck is unavailable. Restart the Electron app (npm run dev).')
+    }
+    const pipeline = await window.electronAPI.dismissStuckPipelineCharacter(projectId, characterId)
+    get().handlePipelineUpdated(projectId, pipeline)
+  },
+
+  dismissAllStuck: async (projectId) => {
+    if (!window.electronAPI?.dismissAllStuckPipeline) {
+      throw new Error('Clear stuck is unavailable. Restart the Electron app (npm run dev).')
+    }
+    const pipeline = await window.electronAPI.dismissAllStuckPipeline(projectId)
+    get().handlePipelineUpdated(projectId, pipeline)
   },
 
   syncTimelineAudio: async (projectId) => {
