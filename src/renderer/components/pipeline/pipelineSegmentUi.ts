@@ -13,14 +13,16 @@ export function formatAudioMatchMeta(segment: ScriptSegment): string | null {
   const source = segment.scriptMatch.matchSource ?? 'sequential'
   const sourceLabel =
     source === 'word-aligned'
-      ? 'whisper'
+      ? 'sequential'
       : source === 'forced-align'
-        ? 'aligned'
+        ? 'sequential'
         : source === 'weighted-fallback'
-          ? 'weighted'
+          ? 'legacy-weighted'
           : source === 'equal-fallback'
-            ? 'equal-split'
-            : source
+            ? 'legacy-split'
+            : source === 'sequential'
+              ? 'sequential'
+              : source
   const confidence = `${(segment.scriptMatch.confidence * 100).toFixed(1)}%`
   return `${sourceLabel} · ${confidence}`
 }
