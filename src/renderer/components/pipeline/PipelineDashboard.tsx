@@ -15,8 +15,10 @@ import {
 import { Button } from '../common/Button'
 import { Label } from '../common/Label'
 import { LlmSettingsPanel } from './LlmSettingsPanel'
+import { AssemblyAiSettingsPanel } from './AssemblyAiSettingsPanel'
 import { ScriptBriefPanel } from './ScriptBriefPanel'
 import { useCreativeInstructionsDraft } from '@renderer/hooks/useCreativeInstructionsDraft'
+import { imageFilesFromClipboard, imageFilesFromPasteEvent } from '@renderer/lib/dropFiles'
 import {
   createEmptyPipelineState,
   normalizePipelineState,
@@ -33,7 +35,7 @@ import {
   usePipelineStore
 } from '@renderer/stores/pipelineStore'
 import { useProjectTabStore } from '@renderer/stores/projectTabStore'
-import { DEFAULT_IMAGE_MODEL, DEFAULT_VIDEO_MODEL } from '@shared/types'
+import { DEFAULT_IMAGE_MODEL, DEFAULT_VIDEO_MODEL, generateId } from '@shared/types'
 
 export function PipelineDashboard({
   projectId,
@@ -56,6 +58,7 @@ export function PipelineDashboard({
   const lastError = usePipelineStore((s) => s.lastError)
   const llmSettings = usePipelineStore((s) => s.llmSettings)
   const loadLlmSettings = usePipelineStore((s) => s.loadLlmSettings)
+  const loadAssemblyAiSettings = usePipelineStore((s) => s.loadAssemblyAiSettings)
 
   const analyzeAndApplyScript = usePipelineStore((s) => s.analyzeAndApplyScript)
   const updatePipeline = usePipelineStore((s) => s.updatePipeline)
@@ -99,7 +102,8 @@ export function PipelineDashboard({
 
   useEffect(() => {
     void loadLlmSettings()
-  }, [loadLlmSettings])
+    void loadAssemblyAiSettings()
+  }, [loadLlmSettings, loadAssemblyAiSettings])
 
   useEffect(() => {
     usePipelineStore.setState({
@@ -107,6 +111,18 @@ export function PipelineDashboard({
         pipeline.pipelineStatus === 'running' || pipeline.pipelineStatus === 'analyzing'
     })
   }, [projectId, pipeline.pipelineStatus])
+
+  // Soft-reconcile orphaned Pause after restart — only when there is no active phase
+  // (a real batch always sets activePhase; mid-batch gaps must not auto-dismiss).
+  useEffect(() => {
+    if (pipeline.pipelineStatus !== 'running' && pipeline.pipelineStatus !== 'paused') return
+    if (pipeline.activePhase) return
+    if (imagesInFlight(pipeline) || videosInFlight(pipeline) || anchorsInFlight(pipeline)) return
+    if (!window.electronAPI?.dismissAllStuckPipeline) return
+    void window.electronAPI.dismissAllStuckPipeline(projectId).then((next) => {
+      usePipelineStore.getState().handlePipelineUpdated(projectId, next)
+    })
+  }, [projectId, pipeline.pipelineStatus, pipeline.activePhase])
 
   const persistScriptDraft = (value: string, immediate = false): void => {
     const current = getProjectPipeline(projectId)
@@ -145,24 +161,57 @@ export function PipelineDashboard({
   }
 
   const handleScriptPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>): void => {
+    const syncImages = imageFilesFromClipboard(event.clipboardData)
+    const attachImages = async (images: File[]): Promise<void> => {
+      if (!window.electronAPI?.importProjectMediaBytes) return
+      const current = getProjectPipeline(projectId) ?? createEmptyPipelineState()
+      const nextRefs = [...(current.scriptReferences ?? [])]
+      for (const file of images) {
+        const imported = await window.electronAPI.importProjectMediaBytes(
+          projectId,
+          file.name || 'pasted-image.png',
+          await file.arrayBuffer()
+        )
+        nextRefs.push({
+          id: generateId(),
+          localPath: imported.localPath,
+          name: imported.name,
+          instruction: ''
+        })
+      }
+      handleReferencesChange(nextRefs)
+    }
+
+    if (syncImages.length > 0) {
+      event.preventDefault()
+      void attachImages(syncImages)
+      return
+    }
+
     const pasted = event.clipboardData.getData('text/plain')
-    if (!pasted) return
+    if (pasted) {
+      event.preventDefault()
+      scriptDirtyRef.current = true
 
-    event.preventDefault()
-    scriptDirtyRef.current = true
+      const textarea = event.currentTarget
+      const start = textarea.selectionStart ?? scriptDraft.length
+      const end = textarea.selectionEnd ?? scriptDraft.length
+      const normalized = normalizePastedScript(pasted)
+      const next = `${scriptDraft.slice(0, start)}${normalized}${scriptDraft.slice(end)}`
+      setScriptDraft(next)
 
-    const textarea = event.currentTarget
-    const start = textarea.selectionStart ?? scriptDraft.length
-    const end = textarea.selectionEnd ?? scriptDraft.length
-    const normalized = normalizePastedScript(pasted)
-    const next = `${scriptDraft.slice(0, start)}${normalized}${scriptDraft.slice(end)}`
-    setScriptDraft(next)
+      const cursor = start + normalized.length
+      requestAnimationFrame(() => {
+        textarea.selectionStart = cursor
+        textarea.selectionEnd = cursor
+      })
+      return
+    }
 
-    const cursor = start + normalized.length
-    requestAnimationFrame(() => {
-      textarea.selectionStart = cursor
-      textarea.selectionEnd = cursor
-    })
+    void (async () => {
+      const images = await imageFilesFromPasteEvent(event.clipboardData)
+      if (images.length > 0) await attachImages(images)
+    })()
   }
 
   const handleScriptBlur = (): void => {
@@ -259,17 +308,15 @@ export function PipelineDashboard({
   const timingsReady = pipeline.segments.length > 0 && timingsPending === 0
   const batchBusy =
     imagesInFlight(pipeline) || anchorsInFlight(pipeline) || videosInFlight(pipeline)
+  const stuckRunningIdle = pipeline.pipelineStatus === 'running' && !batchBusy
 
   const imageButtonLabel =
-    progress.imagesDone === 0 ? 'Generate images' : 'Generate next batch (images)'
+    progress.imagesDone === 0 ? 'Generate images' : 'Continue images'
   const videoButtonLabel =
-    progress.videosDone === 0 ? 'Generate videos' : 'Generate next batch (videos)'
+    progress.videosDone === 0 ? 'Generate videos' : 'Continue videos'
 
   const canStartImageBatch =
-    pendingImages > 0 &&
-    !batchBusy &&
-    pipeline.pipelineStatus !== 'running' &&
-    pipeline.pipelineStatus !== 'paused'
+    pendingImages > 0 && !batchBusy && pipeline.pipelineStatus !== 'paused'
 
   const canStartVideoBatch =
     imagesComplete &&
@@ -277,7 +324,6 @@ export function PipelineDashboard({
     Boolean(pipeline.masterAudioPath) &&
     timingsReady &&
     !batchBusy &&
-    pipeline.pipelineStatus !== 'running' &&
     pipeline.pipelineStatus !== 'paused'
 
   const canMatchTimings =
@@ -285,7 +331,6 @@ export function PipelineDashboard({
     Boolean(pipeline.masterAudioPath) &&
     !batchBusy &&
     !matchingTimings &&
-    pipeline.pipelineStatus !== 'running' &&
     pipeline.pipelineStatus !== 'paused'
 
   const imagesBlockedReason =
@@ -299,9 +344,7 @@ export function PipelineDashboard({
             ? 'Wait for script analysis to finish.'
             : syncingAudio
               ? 'Wait for timeline audio sync to finish.'
-              : pipeline.pipelineStatus === 'running'
-                ? 'Generation is in progress.'
-                : null
+              : null
 
   const videosBlockedReason =
     pipeline.segments.length === 0
@@ -318,10 +361,14 @@ export function PipelineDashboard({
               : 'No segments are ready for video — ensure each segment has an approved image.'
             : batchBusy
               ? 'Wait for the current batch to finish downloading.'
-              : pipeline.pipelineStatus === 'running'
-                ? 'Generation is in progress.'
-                : null
+              : null
 
+  const handleUnlockPipeline = (): void => {
+    if (!window.electronAPI?.dismissAllStuckPipeline) return
+    void window.electronAPI.dismissAllStuckPipeline(projectId).then((next) => {
+      usePipelineStore.getState().handlePipelineUpdated(projectId, next)
+    })
+  }
   return (
     <div className="flex flex-col gap-4 p-4">
       <div className="flex items-center justify-between gap-2">
@@ -368,6 +415,7 @@ export function PipelineDashboard({
         </button>
         {llmSettingsOpen && (
           <div className="px-3 pb-3">
+            <AssemblyAiSettingsPanel />
             <LlmSettingsPanel />
           </div>
         )}
@@ -471,7 +519,7 @@ export function PipelineDashboard({
           )}
           Get segment timings
         </Button>
-        {pipeline.pipelineStatus === 'running' ? (
+        {pipeline.pipelineStatus === 'running' && batchBusy ? (
           <Button size="sm" onClick={() => void pausePipeline(projectId)}>
             <Pause size={14} className="mr-1" /> Pause
           </Button>
@@ -481,11 +529,24 @@ export function PipelineDashboard({
           </Button>
         ) : (
           <>
+            {stuckRunningIdle && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleUnlockPipeline}
+                title="Pipeline thinks it is running but nothing is generating — unlock to continue"
+              >
+                Unlock
+              </Button>
+            )}
             {canStartImageBatch && (
               <Button
                 size="sm"
                 disabled={Boolean(imagesBlockedReason && !canStartImageBatch)}
-                title={imagesBlockedReason ?? 'Generate up to 10 segment images per batch (audio sync not required)'}
+                title={
+                  imagesBlockedReason ??
+                  'Starts image generation (10 at a time). Next batches and failed images retry automatically.'
+                }
                 onClick={() => void handleStartImages()}
               >
                 <Image size={14} className="mr-1" /> {imageButtonLabel}
@@ -497,7 +558,7 @@ export function PipelineDashboard({
                 variant="outline"
                 title={
                   videosBlockedReason ??
-                  'Match segments to timeline audio, then generate up to 5 videos per batch'
+                  'Starts video generation (5 at a time). Next batches and failed videos retry automatically.'
                 }
                 onClick={() => void handleStartVideos()}
               >
@@ -508,7 +569,6 @@ export function PipelineDashboard({
               imagesComplete &&
               Boolean(pipeline.masterAudioPath) &&
               pendingVideos > 0 &&
-              pipeline.pipelineStatus !== 'running' &&
               pipeline.pipelineStatus !== 'paused' && (
                 <Button
                   size="sm"
@@ -532,13 +592,13 @@ export function PipelineDashboard({
         </Button>
       </div>
 
-      {imagesBlockedReason && !canStartImageBatch && pipeline.pipelineStatus !== 'running' && pipeline.pipelineStatus !== 'paused' && pendingImages > 0 && (
+      {imagesBlockedReason && !canStartImageBatch && pipeline.pipelineStatus !== 'paused' && !(pipeline.pipelineStatus === 'running' && batchBusy) && pendingImages > 0 && (
         <p className="text-[10px] text-muted">{imagesBlockedReason}</p>
       )}
       {videosBlockedReason &&
         !canStartVideoBatch &&
-        pipeline.pipelineStatus !== 'running' &&
         pipeline.pipelineStatus !== 'paused' &&
+        !(pipeline.pipelineStatus === 'running' && batchBusy) &&
         imagesComplete &&
         Boolean(pipeline.masterAudioPath) &&
         (pendingVideos > 0 || progress.videosDone < progress.totalSegments) && (
