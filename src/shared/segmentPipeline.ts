@@ -143,6 +143,12 @@ export interface LlmSettings {
   model: string
 }
 
+export interface AssemblyAiSettings {
+  apiKey: string
+  /** US or EU data residency. */
+  region: 'us' | 'eu'
+}
+
 export interface LlmAnalyzeSegmentInput {
   index: number
   scriptText: string
@@ -212,6 +218,11 @@ export const DEFAULT_LLM_SETTINGS: LlmSettings = {
   apiKey: '',
   baseUrl: AIMLAPI_DEFAULT_BASE_URL,
   model: 'deepseek/deepseek-chat'
+}
+
+export const DEFAULT_ASSEMBLYAI_SETTINGS: AssemblyAiSettings = {
+  apiKey: '',
+  region: 'us'
 }
 
 export const DEFAULT_STYLE_LOCK: StyleLock = {
