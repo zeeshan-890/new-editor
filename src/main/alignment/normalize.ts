@@ -1,7 +1,9 @@
 export function normalizeText(value: string): string {
   return value
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
+    // Keep letters from any language (mixed-script audio/scripts).
+    .replace(/[^\p{L}\p{N}\s']/gu, ' ')
+    .replace(/'/g, '')
     .replace(/\s+/g, ' ')
     .trim()
 }
