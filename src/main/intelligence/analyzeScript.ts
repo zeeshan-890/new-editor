@@ -8,13 +8,20 @@ import {
 } from './validateAnalysis'
 import {
   formatScenesForLlm,
+  formatSegmentBlocksForLlm,
   isStructuredSceneScript,
+  isStructuredSegmentScript,
   narrationScriptFromScenes,
+  narrationScriptFromSegmentBlocks,
   parseStructuredSceneScript,
-  type ParsedScene
+  parseStructuredSegmentScript,
+  type ParsedScene,
+  type ParsedSegmentBlock
 } from './parseStructuredScript'
 import {
+  buildDeterministicSegmentBlockResult,
   buildDeterministicStructuredResult,
+  finalizeStructuredSegmentBlocks,
   finalizeStructuredSegments
 } from './enrichStructuredPrompts'
 
@@ -56,6 +63,8 @@ Image prompt rules:
 - Each imagePrompt must describe ONE full scene frame suitable for image-to-video animation
 - Focus the frame on ONLY this segment's beat (do not cram the whole sentence's other beats into the same image)
 - Never ask for character sheets, reference boards, turnaround views, contact sheets, split panels, or collages
+- Live-action/lifestyle scenes: never add floating medical diagrams, holographic anatomy, HUD panels, X-ray overlays, or educational infographic layers unless the beat is explicitly a diagram
+- Diagram/scientific scenes: clean single-subject visualization only — no people, faces, bathroom/kitchen lifestyle sets, or extra unrelated diagrams unless the beat requires them
 - Prefer medium or wide shots with environmental context
 - 40-120 words per imagePrompt
 
@@ -133,7 +142,7 @@ Hard rules:
 1. Return EXACTLY one segment per Scene, same count and order.
 2. scriptText MUST equal the provided VO text.
 3. Never create one segment per Clip.
-4. imagePrompt: one unified cinematic still (40-140 words) from clips + only applicable synthesized guidance.
+4. imagePrompt: one unified cinematic still (40-140 words) from clips + only applicable synthesized guidance. Live scenes must not invent floating medical/HUD overlays; diagram scenes must stay clean (no people/lifestyle set dressing unless specified).
 5. videoMotionPrompt: REQUIRED concrete motion from clips (1-2 sentences): specific subject actions + camera move. Never "subtle/gentle only". No instruction dumps. No filenames.
 6. Extract characters with snake_case ids, role, description.
 7. continuityFromPrevious: true only for direct visual continuations.
@@ -149,6 +158,56 @@ Respond with ONLY valid JSON matching this schema:
       "videoMotionPrompt": "concrete subject + camera motion",
       "characters": ["woman"],
       "referenceIds": ["only_if_this_scene_needs_that_image"],
+      "continuityFromPrevious": false
+    }
+  ],
+  "characters": [
+    {
+      "id": "woman",
+      "name": "Woman",
+      "role": "protagonist",
+      "description": "50-60 year old woman, natural features, everyday wardrobe"
+    }
+  ],
+  "styleLock": {
+    "aspectRatio": "9:16",
+    "visualStyle": "overall look synthesized from brief + script",
+    "setting": "primary story setting"
+  }
+}`
+
+const SEGMENT_BLOCK_SYSTEM_PROMPT = `You are a professional script-to-storyboard analyst for video production.
+
+The input is ALREADY segmented into Segment / Script / V0 Prompt blocks. Your job is NOT to re-split the script.
+
+Structure meaning (fixed):
+- Segment N = ONE output segment (index = segment order starting at 0)
+- Script = spoken narration → scriptText (copy EXACTLY; never add Segment/Script/V0 Prompt labels)
+- V0 Prompt (aka VO Prompt) = the image prompt → imagePrompt (copy EXACTLY; do not rewrite or shorten)
+- Creative instructions = a free-form RULEBOOK written by the user at runtime (content can be ANYTHING)
+- Attached reference images = optional assets with free-form usage notes (also anything)
+
+Your job (critical):
+1. Return EXACTLY one segment per Segment block, same count and order.
+2. scriptText MUST equal the provided Script text exactly.
+3. imagePrompt MUST equal the provided V0 Prompt text exactly.
+4. Write videoMotionPrompt from the V0 Prompt: concrete subject + camera motion (1-2 sentences). Never "subtle/gentle only".
+5. Extract characters with snake_case ids, role, description from Script + V0 Prompt.
+6. Apply creative instructions / references via reasoning: synthesize into videoMotionPrompt / character descriptions / styleLock only — NEVER paste verbatim, NEVER rewrite scriptText or imagePrompt.
+7. Put reference ids in segment.referenceIds only when that image should guide generation.
+8. continuityFromPrevious: true only for direct visual continuations.
+9. styleLock.visualStyle / setting should reflect overall look inferred from the brief + prompts (synthesized, not pasted).
+
+Respond with ONLY valid JSON matching this schema:
+{
+  "segments": [
+    {
+      "index": 0,
+      "scriptText": "exact Script narration only",
+      "imagePrompt": "exact V0 Prompt text only",
+      "videoMotionPrompt": "concrete subject + camera motion",
+      "characters": ["woman"],
+      "referenceIds": ["only_if_this_segment_needs_that_image"],
       "continuityFromPrevious": false
     }
   ],
@@ -254,6 +313,22 @@ function buildStructuredUserMessage(input: AnalyzeScriptInput, scenes: ParsedSce
   return parts.join('\n\n')
 }
 
+function buildSegmentBlockUserMessage(
+  input: AnalyzeScriptInput,
+  blocks: ParsedSegmentBlock[]
+): string {
+  const parts: string[] = [
+    `Return exactly ${blocks.length} segments (one per Segment below).`,
+    'Do not re-split. scriptText must match each Script exactly. imagePrompt must match each V0 Prompt exactly.',
+    'Enrich characters, styleLock, referenceIds, and videoMotionPrompt only — never rewrite Script or V0 Prompt text.'
+  ]
+
+  appendBriefSections(parts, input)
+
+  parts.push('---', 'SEGMENTS:', formatSegmentBlocksForLlm(blocks))
+  return parts.join('\n\n')
+}
+
 export async function analyzeScript(
   input: AnalyzeScriptInput | string
 ): Promise<LlmAnalyzeResult> {
@@ -265,13 +340,62 @@ export async function analyzeScript(
   }
 
   const referenceIds = new Set((normalized.references ?? []).map((ref) => ref.id))
+  const structuredBlocks = parseStructuredSegmentScript(trimmed)
+  const useSegmentBlocks = Boolean(structuredBlocks && isStructuredSegmentScript(trimmed))
   const structuredScenes = parseStructuredSceneScript(trimmed)
-  const useStructured = Boolean(structuredScenes && isStructuredSceneScript(trimmed))
+  const useStructuredScenes = Boolean(structuredScenes && isStructuredSceneScript(trimmed))
 
   const settings = await loadLlmSettings()
   const provider = createOpenAiCompatibleProvider(settings)
 
-  if (useStructured && structuredScenes) {
+  if (useSegmentBlocks && structuredBlocks) {
+    console.log('[Pipeline · analyze] Detected Segment/Script/V0 Prompt structure', {
+      segments: structuredBlocks.length,
+      creativeInstructions: Boolean(normalized.creativeInstructions?.trim()),
+      references: normalized.references?.length ?? 0,
+      vos: structuredBlocks.map((b) => ({
+        segment: b.segmentNumber,
+        script: b.scriptText.slice(0, 80),
+        prompt: b.imagePrompt.slice(0, 60)
+      }))
+    })
+    const userMessage = buildSegmentBlockUserMessage(normalized, structuredBlocks)
+    const narrationOnly = narrationScriptFromSegmentBlocks(structuredBlocks)
+
+    const attempt = async (extraUserNote?: string): Promise<LlmAnalyzeResult> => {
+      const userContent = extraUserNote
+        ? `${userMessage}\n\n---\nFix the previous response. Error: ${extraUserNote}`
+        : userMessage
+
+      const raw = await provider.complete(
+        [
+          { role: 'system', content: SEGMENT_BLOCK_SYSTEM_PROMPT },
+          { role: 'user', content: userContent }
+        ],
+        { jsonMode: true, temperature: 0.2 }
+      )
+
+      const parsed = parseLlmJsonResponse(raw)
+      const validated = validateAnalysisResult(parsed, referenceIds, {
+        fullScript: narrationOnly,
+        enforceExactScript: false,
+        expectedSegmentCount: structuredBlocks.length
+      })
+      return finalizeStructuredSegmentBlocks(validated, structuredBlocks, normalized)
+    }
+
+    try {
+      return await attempt()
+    } catch (firstErr) {
+      try {
+        return await attempt(formatValidationError(firstErr))
+      } catch {
+        return buildDeterministicSegmentBlockResult(structuredBlocks, normalized)
+      }
+    }
+  }
+
+  if (useStructuredScenes && structuredScenes) {
     console.log('[Pipeline · analyze] Detected Scene/VO/Clip structure', {
       scenes: structuredScenes.length,
       creativeInstructions: Boolean(normalized.creativeInstructions?.trim()),
