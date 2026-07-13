@@ -52,6 +52,7 @@ export const IPC = {
   VIDEO_EXPORT: 'video:export',
   VIDEO_EDITOR_PROJECT_SAVE: 'video-editor:project-save',
   MEDIA_SAVE_AS: 'media:save-as',
+  MEDIA_SAVE_MANY: 'media:save-many',
   LLM_SETTINGS_GET: 'llm:settings-get',
   LLM_SETTINGS_SAVE: 'llm:settings-save',
   LLM_ANALYZE_SCRIPT: 'llm:analyze-script',
