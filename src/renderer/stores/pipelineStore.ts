@@ -218,6 +218,7 @@ export const usePipelineStore = create<{
   startPipelineImages: (projectId: string) => Promise<void>
   startPipelineVideos: (projectId: string) => Promise<void>
   pausePipeline: (projectId: string) => Promise<void>
+  stopPipeline: (projectId: string) => Promise<void>
   resumePipeline: (projectId: string) => Promise<void>
   retrySegment: (
     projectId: string,
@@ -388,6 +389,23 @@ export const usePipelineStore = create<{
     const pipeline = await window.electronAPI.pausePipeline(projectId)
     get().handlePipelineUpdated(projectId, pipeline)
     set({ pipelineRunning: false })
+  },
+
+  stopPipeline: async (projectId) => {
+    if (!window.electronAPI?.stopPipeline) {
+      throw new Error('Pipeline stop is unavailable. Restart the Electron app (npm run dev).')
+    }
+    set({ lastError: null })
+    try {
+      const pipeline = await window.electronAPI.stopPipeline(projectId)
+      get().handlePipelineUpdated(projectId, pipeline)
+      set({ pipelineRunning: false })
+      void useHiggsfieldStore.getState().syncJobs()
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      set({ lastError: message })
+      throw err
+    }
   },
 
   resumePipeline: async (projectId) => {
