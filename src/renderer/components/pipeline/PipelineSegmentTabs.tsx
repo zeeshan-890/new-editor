@@ -246,7 +246,7 @@ function PromptTab({
               value={segment.videoMotionPrompt ?? ''}
               onChange={(e) => onEditSegment(segment.id, { videoMotionPrompt: e.target.value })}
               rows={2}
-              placeholder="Subtle natural motion, gentle camera movement…"
+              placeholder="Visible subject action + slow camera push-in…"
               className="w-full rounded border border-border bg-background px-2 py-1 text-[10px] resize-y"
             />
           </div>
