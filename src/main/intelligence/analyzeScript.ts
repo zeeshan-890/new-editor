@@ -20,15 +20,21 @@ import {
 
 const FREEFORM_SYSTEM_PROMPT = `You are a professional script-to-storyboard analyst for video production.
 
-Your task: analyze a narration script and split it into visual segments. Each segment must represent ONE clear visual concept that could be shown as a single animatable scene frame (one unified photograph — never a character sheet, reference board, or multi-panel collage).
+Your task: analyze a narration script and split it into the MAXIMUM number of short visual segments. Prefer MORE segments over fewer. Each segment must be the smallest useful narration beat that can be shown as ONE animatable scene frame (one unified photograph — never a character sheet, reference board, or multi-panel collage).
 
 The user may also provide creative instructions (separate from the script) and reference images with per-image usage notes. Treat creative instructions as a free-form runtime rulebook: interpret what each part means, apply only the parts that fit each segment's visual context, and synthesize them into natural prompt language. Never paste creative instructions or reference filenames/usage notes verbatim into prompts. Assign reference ids only to segments where that image should guide generation.
 
-Segmentation rules:
-- Split when action changes, location changes, time changes, emotion shifts, or camera focus changes
-- A single sentence may contain multiple segments if it has multiple visual concepts
-- Do not merge unrelated actions into one segment
+Segmentation rules (fine-grain — critical):
+- Default to the SHORTEST possible segment: ideally one clause, one subject, or one concrete visual beat (~3–18 words of scriptText)
+- Split whenever the camera could cut: action change, location change, time change, emotion shift, subject change, product feature, or new example
+- Split lists and enumerations into SEPARATE segments (e.g. "toddlers…, teenagers…, and grown men…" → 3 segments)
+- Split compound sentences on commas, em dashes (—), semicolons, colons, and "and/or/but/while/when" when each side has its own visual
+- A single sentence SHOULD become multiple segments whenever it mentions multiple people, places, products, problems, or payoffs
+- Do NOT keep a long story beat in one segment just because it is one grammatical sentence
+- Do NOT merge adjacent short beats; never combine unrelated examples into one segment
+- Prefer over-splitting: if unsure whether to split, SPLIT
 - Keep segment scriptText as the EXACT verbatim narration words only (never include labels like Scene, VO, Clip, or stage directions)
+- Concatenating all scriptText values in order must reconstruct the full narration with original wording
 - Order segments in narration order with index starting at 0
 
 Character rules:
@@ -48,6 +54,7 @@ Image prompt rules:
 - When multiple characters appear, show them interacting naturally in context (e.g. doctor speaking with patient in exam room)
 - Be specific and visual — describe what the camera sees, not abstract concepts
 - Each imagePrompt must describe ONE full scene frame suitable for image-to-video animation
+- Focus the frame on ONLY this segment's beat (do not cram the whole sentence's other beats into the same image)
 - Never ask for character sheets, reference boards, turnaround views, contact sheets, split panels, or collages
 - Prefer medium or wide shots with environmental context
 - 40-120 words per imagePrompt
@@ -58,8 +65,10 @@ Reference image rules:
 - Synthesize matching guidance into imagePrompt prose — never paste filenames or raw usage notes
 - Creative instructions are free-form: interpret and apply only where relevant; never paste them verbatim
 
-Video motion (optional per segment):
-- Short hint for image-to-video only — no creative-instruction dumps
+Video motion (required per segment):
+- 1–2 sentences of CONCRETE motion for image-to-video (who moves, how hands/face change, camera push-in/orbit/pan)
+- NEVER write only "subtle", "gentle", or "minimal motion" — models treat that as nearly static
+- No creative-instruction dumps
 
 continuityFromPrevious: true only when the scene is a direct visual continuation of the previous segment (same location, continuous action).
 
@@ -70,7 +79,7 @@ Respond with ONLY valid JSON matching this schema:
       "index": 0,
       "scriptText": "exact narration words only",
       "imagePrompt": "detailed scene prompt with roles and setting",
-      "videoMotionPrompt": "optional motion hint",
+      "videoMotionPrompt": "concrete subject + camera motion",
       "characters": ["doctor_chen"],
       "referenceIds": ["optional_reference_id"],
       "continuityFromPrevious": false
@@ -125,7 +134,7 @@ Hard rules:
 2. scriptText MUST equal the provided VO text.
 3. Never create one segment per Clip.
 4. imagePrompt: one unified cinematic still (40-140 words) from clips + only applicable synthesized guidance.
-5. videoMotionPrompt: SHORT motion/camera hint from clips (1-2 sentences). No instruction dumps. No filenames.
+5. videoMotionPrompt: REQUIRED concrete motion from clips (1-2 sentences): specific subject actions + camera move. Never "subtle/gentle only". No instruction dumps. No filenames.
 6. Extract characters with snake_case ids, role, description.
 7. continuityFromPrevious: true only for direct visual continuations.
 8. styleLock.visualStyle / setting should reflect overall look inferred from the brief + script (synthesized, not pasted).
@@ -137,7 +146,7 @@ Respond with ONLY valid JSON matching this schema:
       "index": 0,
       "scriptText": "exact VO narration only",
       "imagePrompt": "synthesized scene prompt — no raw instruction paste",
-      "videoMotionPrompt": "short motion hint only",
+      "videoMotionPrompt": "concrete subject + camera motion",
       "characters": ["woman"],
       "referenceIds": ["only_if_this_scene_needs_that_image"],
       "continuityFromPrevious": false
@@ -181,9 +190,53 @@ function appendBriefSections(parts: string[], input: AnalyzeScriptInput): void {
   }
 }
 
+function wordCount(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length
+}
+
+/** True when freeform analysis still produced overly long narration beats. */
+function isCoarseSegmentation(result: LlmAnalyzeResult, fullScript: string): boolean {
+  const segments = result.segments
+  if (segments.length === 0) return true
+
+  const counts = segments.map((segment) => wordCount(segment.scriptText))
+  const avg = counts.reduce((sum, n) => sum + n, 0) / counts.length
+  const hasLong = counts.some((n) => n > 20)
+  const scriptWords = wordCount(fullScript)
+  const expectedMin = Math.max(4, Math.ceil(scriptWords / 12))
+
+  return hasLong || avg > 14 || segments.length < expectedMin
+}
+
+function buildFineSplitRetryNote(result: LlmAnalyzeResult): string {
+  const longOnes = result.segments
+    .filter((segment) => wordCount(segment.scriptText) > 14)
+    .slice(0, 6)
+    .map(
+      (segment) =>
+        `- segment ${segment.index + 1} (${wordCount(segment.scriptText)} words): "${segment.scriptText.slice(0, 120)}"`
+    )
+
+  return [
+    `Previous response was too coarse (${result.segments.length} segments).`,
+    'Re-split into MANY more short segments. Prefer over-splitting.',
+    'Break lists/examples and compound sentences into separate segments.',
+    'Target roughly 3–18 words of scriptText per segment when possible.',
+    longOnes.length > 0 ? 'Especially split these long beats:' : '',
+    ...longOnes
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
 function buildUserMessage(input: AnalyzeScriptInput): string {
   const script = input.script.trim()
-  const parts: string[] = [script]
+  const parts: string[] = [
+    'Split this narration into the MAXIMUM number of short visual segments (prefer over-splitting).',
+    'Lists, examples, and compound sentences must become separate segments.',
+    '',
+    script
+  ]
   appendBriefSections(parts, input)
   return parts.join('\n\n')
 }
@@ -289,7 +342,22 @@ export async function analyzeScript(
   }
 
   try {
-    return await attempt()
+    let result = await attempt()
+    if (isCoarseSegmentation(result, trimmed)) {
+      console.log('[Pipeline · analyze] Coarse freeform split — requesting finer segments', {
+        segments: result.segments.length,
+        avgWords: Math.round(
+          result.segments.reduce((sum, s) => sum + wordCount(s.scriptText), 0) /
+            Math.max(1, result.segments.length)
+        )
+      })
+      try {
+        result = await attempt(buildFineSplitRetryNote(result))
+      } catch {
+        // Keep the first valid result if the fine-split retry fails validation.
+      }
+    }
+    return result
   } catch (firstErr) {
     try {
       return await attempt(formatValidationError(firstErr))
