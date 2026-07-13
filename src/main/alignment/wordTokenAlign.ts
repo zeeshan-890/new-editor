@@ -3,157 +3,215 @@ import { normalizeText, tokenize } from './normalize'
 import type { TranscriptWordSegment } from './whisper'
 
 function tokensRoughlyMatch(a: string, b: string): boolean {
+  if (!a || !b) return false
   if (a === b) return true
-  if (a.length >= 4 && b.length >= 4 && (a.startsWith(b) || b.startsWith(a))) return true
+  if (a.length >= 3 && b.length >= 3 && (a.startsWith(b) || b.startsWith(a))) return true
+  if (a.length >= 5 && b.length >= 5) {
+    const shorter = a.length <= b.length ? a : b
+    const longer = a.length <= b.length ? b : a
+    if (longer.includes(shorter)) return true
+  }
   return false
 }
 
-function alignScriptTokensToWords(
+function scoreWindow(
   scriptTokens: string[],
-  words: TranscriptWordSegment[]
-): Array<number | null> {
-  const mapping: Array<number | null> = []
-  let wordCursor = 0
-
+  words: TranscriptWordSegment[],
+  start: number,
+  end: number
+): number {
+  if (end < start || scriptTokens.length === 0) return 0
+  const windowTokens = words.slice(start, end + 1).map((w) => normalizeText(w.text))
+  let matched = 0
+  let cursor = 0
   for (const scriptToken of scriptTokens) {
-    let matched: number | null = null
-    const searchLimit = Math.min(words.length, wordCursor + 32)
-
-    for (let i = wordCursor; i < searchLimit; i++) {
-      const wordToken = normalizeText(words[i].text)
-      if (tokensRoughlyMatch(scriptToken, wordToken)) {
-        matched = i
-        wordCursor = i + 1
+    let found = false
+    for (let i = cursor; i < windowTokens.length; i++) {
+      if (tokensRoughlyMatch(scriptToken, windowTokens[i])) {
+        matched += 1
+        cursor = i + 1
+        found = true
         break
       }
     }
-
-    mapping.push(matched)
+    if (!found) {
+      // allow one-token skip in window without advancing forever
+      continue
+    }
   }
-
-  return mapping
+  return matched / scriptTokens.length
 }
 
-function findSegmentTokenWindow(
-  fullTokens: string[],
-  segmentTokens: string[],
-  minStartTokenIdx: number
-): { start: number; end: number } | null {
-  if (segmentTokens.length === 0 || fullTokens.length === 0) return null
-  const maxStart = fullTokens.length - segmentTokens.length
-  if (maxStart < minStartTokenIdx) return null
+/**
+ * Find the best contiguous word window for this segment starting at/after wordCursor.
+ * Prefers high recall of script tokens in order.
+ */
+function findSequentialWordWindow(
+  scriptTokens: string[],
+  words: TranscriptWordSegment[],
+  wordCursor: number
+): { start: number; end: number; score: number } | null {
+  if (scriptTokens.length === 0 || wordCursor >= words.length) return null
 
-  let best:
-    | {
-        start: number
-        matched: number
+  const expectedLen = scriptTokens.length
+  const minLen = Math.max(1, Math.floor(expectedLen * 0.5))
+  const maxLen = Math.max(expectedLen + 8, Math.ceil(expectedLen * 2.5))
+  const searchLimit = Math.min(words.length, wordCursor + Math.max(48, expectedLen * 6))
+
+  let best: { start: number; end: number; score: number } | null = null
+
+  for (let start = wordCursor; start < searchLimit; start++) {
+    // Don't drift too far from cursor without a strong match
+    if (start > wordCursor + 24 && (!best || best.score < 0.55)) break
+
+    for (let len = minLen; len <= maxLen; len++) {
+      const end = start + len - 1
+      if (end >= words.length) break
+      const score = scoreWindow(scriptTokens, words, start, end)
+      if (
+        !best ||
+        score > best.score + 0.02 ||
+        (Math.abs(score - best.score) <= 0.02 && start < best.start)
+      ) {
+        best = { start, end, score }
       }
-    | null = null
-
-  for (let start = minStartTokenIdx; start <= maxStart; start++) {
-    let matched = 0
-    for (let i = 0; i < segmentTokens.length; i++) {
-      if (tokensRoughlyMatch(fullTokens[start + i], segmentTokens[i])) {
-        matched += 1
-      }
-    }
-    const ratio = matched / segmentTokens.length
-    if (ratio >= 0.85) {
-      return { start, end: start + segmentTokens.length - 1 }
-    }
-    if (!best || matched > best.matched) {
-      best = { start, matched }
+      if (score >= 0.92) return best
     }
   }
 
-  if (!best) return null
-  const bestRatio = best.matched / segmentTokens.length
-  if (bestRatio >= 0.65) {
-    return { start: best.start, end: best.start + segmentTokens.length - 1 }
-  }
-  return null
+  if (!best || best.score < 0.35) return null
+  return best
 }
 
-function nearestWordIndex(
-  tokenToWord: Array<number | null>,
-  from: number,
-  to: number
-): number | null {
-  for (let i = from; i <= to; i++) {
-    const idx = tokenToWord[i]
-    if (idx != null) return idx
+function wordsToMatch(
+  segmentId: string,
+  words: TranscriptWordSegment[],
+  startIdx: number,
+  endIdx: number,
+  confidence: number,
+  trimOffsetMs: number,
+  matchSource: NonNullable<ScriptAudioMatch['matchSource']>,
+  matchedAt: number,
+  scriptTokenCount: number
+): { segmentId: string; match: ScriptAudioMatch } {
+  const safeStart = Math.max(0, Math.min(startIdx, endIdx))
+  const safeEnd = Math.min(words.length - 1, Math.max(startIdx, endIdx))
+  const first = words[safeStart]
+  const last = words[safeEnd]
+  const startMs = Math.round(first.startSec * 1000 + trimOffsetMs)
+  const wordEndMs = Math.round(last.endSec * 1000 + trimOffsetMs)
+  // Never allow absurdly short clips: ~280ms per script word, floor 120ms.
+  const minDurationMs = Math.max(120, scriptTokenCount * 280)
+  const endMs = Math.max(startMs + minDurationMs, wordEndMs)
+  return {
+    segmentId,
+    match: {
+      startMs,
+      endMs,
+      durationMs: endMs - startMs,
+      confidence: Number(confidence.toFixed(3)),
+      matchSource,
+      matchedAt
+    }
   }
-  for (let i = from - 1; i >= 0; i--) {
-    const idx = tokenToWord[i]
-    if (idx != null) return idx
-  }
-  for (let i = to + 1; i < tokenToWord.length; i++) {
-    const idx = tokenToWord[i]
-    if (idx != null) return idx
-  }
-  return null
 }
 
+/**
+ * Walk segments in order through word timestamps. Always returns one match per segment
+ * when words exist — never leaves gaps for weighted fills.
+ */
 export function alignSegmentsByWordTokens(
   segments: Array<{ id: string; scriptText: string }>,
   wordSegments: TranscriptWordSegment[],
-  fullScript: string,
+  _fullScript: string,
   trimOffsetMs: number,
-  matchSource: NonNullable<ScriptAudioMatch['matchSource']> = 'word-aligned'
+  matchSource: NonNullable<ScriptAudioMatch['matchSource']> = 'sequential'
 ): Array<{ segmentId: string; match: ScriptAudioMatch }> | null {
   if (segments.length === 0 || wordSegments.length === 0) return null
 
-  const scriptTokens = tokenize(normalizeText(fullScript))
-  if (scriptTokens.length === 0) return null
-
-  const tokenToWord = alignScriptTokensToWords(scriptTokens, wordSegments)
-  const matchedCount = tokenToWord.filter((idx) => idx != null).length
-  if (matchedCount < scriptTokens.length * 0.7) return null
-
   const now = Date.now()
-  let tokenCursor = 0
+  let wordCursor = 0
   const results: Array<{ segmentId: string; match: ScriptAudioMatch }> = []
 
-  for (const segment of segments) {
+  for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+    const segment = segments[segIdx]
     const segTokens = tokenize(normalizeText(segment.scriptText))
-    if (segTokens.length === 0) return null
+    const remainingSegments = segments.length - segIdx
+    const remainingWords = Math.max(1, wordSegments.length - wordCursor)
 
-    const tokenWindow = findSegmentTokenWindow(scriptTokens, segTokens, tokenCursor)
-    if (!tokenWindow) return null
-    tokenCursor = tokenWindow.end + 1
+    if (segTokens.length === 0) {
+      const idx = Math.min(wordCursor, wordSegments.length - 1)
+      results.push(
+        wordsToMatch(segment.id, wordSegments, idx, idx, 0.2, trimOffsetMs, matchSource, now, 1)
+      )
+      wordCursor = Math.min(wordSegments.length, idx + 1)
+      continue
+    }
 
-    const startWordIdx =
-      nearestWordIndex(tokenToWord, tokenWindow.start, tokenWindow.start) ??
-      nearestWordIndex(tokenToWord, tokenWindow.start, tokenWindow.end)
-    const endWordIdx =
-      nearestWordIndex(tokenToWord, tokenWindow.end, tokenWindow.end) ??
-      nearestWordIndex(tokenToWord, tokenWindow.start, tokenWindow.end)
+    const window = findSequentialWordWindow(segTokens, wordSegments, wordCursor)
+    if (window && window.score >= 0.35) {
+      results.push(
+        wordsToMatch(
+          segment.id,
+          wordSegments,
+          window.start,
+          window.end,
+          Math.max(0.4, window.score),
+          trimOffsetMs,
+          matchSource,
+          now,
+          segTokens.length
+        )
+      )
+      wordCursor = window.end + 1
+      continue
+    }
 
-    if (startWordIdx == null || endWordIdx == null) return null
-    const safeStartWordIdx = Math.min(startWordIdx, endWordIdx)
-    const safeEndWordIdx = Math.max(startWordIdx, endWordIdx)
-
-    const firstWord = wordSegments[safeStartWordIdx]
-    const lastWord = wordSegments[safeEndWordIdx]
-    const startMs = Math.round(firstWord.startSec * 1000 + trimOffsetMs)
-    const endMs = Math.max(startMs + 1, Math.round(lastWord.endSec * 1000 + trimOffsetMs))
-    const mappedCount = tokenToWord
-      .slice(tokenWindow.start, tokenWindow.end + 1)
-      .filter((idx): idx is number => idx != null).length
-    const confidence = Number((mappedCount / segTokens.length).toFixed(3))
-
-    results.push({
-      segmentId: segment.id,
-      match: {
-        startMs,
-        endMs,
-        durationMs: endMs - startMs,
-        confidence,
+    // Fallback: take a fair share of remaining words (still real timestamps, not weighted time).
+    const fairShare = Math.max(
+      1,
+      Math.round(remainingWords / remainingSegments)
+    )
+    const take = Math.min(
+      remainingWords,
+      Math.max(fairShare, Math.min(segTokens.length, remainingWords - (remainingSegments - 1)))
+    )
+    const startIdx = Math.min(wordCursor, wordSegments.length - 1)
+    const endIdx = Math.min(wordSegments.length - 1, startIdx + take - 1)
+    results.push(
+      wordsToMatch(
+        segment.id,
+        wordSegments,
+        startIdx,
+        endIdx,
+        0.35,
+        trimOffsetMs,
         matchSource,
-        matchedAt: now
-      }
-    })
+        now,
+        segTokens.length
+      )
+    )
+    wordCursor = endIdx + 1
   }
 
-  return results
+  // Ensure monotonic non-overlapping times (shrink later segments if min-duration expanded overlap).
+  for (let i = 1; i < results.length; i++) {
+    const prev = results[i - 1].match
+    const cur = results[i].match
+    if (cur.startMs < prev.endMs) {
+      const startMs = prev.endMs
+      const endMs = Math.max(startMs + 120, cur.endMs)
+      results[i] = {
+        ...results[i],
+        match: {
+          ...cur,
+          startMs,
+          endMs,
+          durationMs: endMs - startMs
+        }
+      }
+    }
+  }
+
+  return results.length === segments.length ? results : null
 }
