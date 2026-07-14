@@ -25,6 +25,10 @@ import {
 } from './cli'
 import { logError, logInfo, logWarn } from '../logger'
 import { applyVideoSoundParams } from '../../shared/videoGeneration'
+import {
+  HIGGSFIELD_RECONNECT_MESSAGE,
+  isHiggsfieldAuthFailureMessage
+} from '../../shared/higgsfieldAuth'
 
 const FALLBACK_AUDIO_MODELS: HiggsfieldModel[] = [
   { id: 'text2speech_v2', name: 'Text to Speech', category: 'audio' },
@@ -203,6 +207,16 @@ export async function getHiggsfieldStatus(): Promise<{
   try {
     workspaces = await listHiggsfieldWorkspaces()
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (isHiggsfieldAuthFailureMessage(msg)) {
+      return {
+        cliAvailable: true,
+        authenticated: false,
+        account: null,
+        cliPath,
+        statusMessage: HIGGSFIELD_RECONNECT_MESSAGE
+      }
+    }
     logError('higgsfield:status', err, { step: 'listWorkspaces' })
     workspaces = []
   }
@@ -228,7 +242,17 @@ export async function getHiggsfieldStatus(): Promise<{
       workspaces,
       selectedWorkspace
     }
-  } catch {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (isHiggsfieldAuthFailureMessage(msg)) {
+      return {
+        cliAvailable: true,
+        authenticated: false,
+        account: null,
+        cliPath,
+        statusMessage: HIGGSFIELD_RECONNECT_MESSAGE
+      }
+    }
     return {
       cliAvailable: true,
       authenticated: true,
@@ -282,7 +306,11 @@ export async function listHiggsfieldVoices(): Promise<HiggsfieldVoice[]> {
         return { id, name, type: type === 'element' ? 'element' : 'preset' }
       })
       .filter((item): item is HiggsfieldVoice => item !== null)
-  } catch {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (isHiggsfieldAuthFailureMessage(msg)) {
+      throw new HiggsfieldCliError(HIGGSFIELD_RECONNECT_MESSAGE, msg)
+    }
     return []
   }
 }
@@ -609,8 +637,8 @@ export async function generateHiggsfieldContent(
 export function formatHiggsfieldError(err: unknown): string {
   if (err instanceof HiggsfieldCliError) {
     const msg = err.message
-    if (msg.toLowerCase().includes('not authenticated')) {
-      return 'Not connected to Higgsfield. Click Connect and complete login in your browser.'
+    if (isHiggsfieldAuthFailureMessage(msg)) {
+      return HIGGSFIELD_RECONNECT_MESSAGE
     }
     if (msg.toLowerCase().includes('no workspace selected')) {
       return 'No workspace selected. Choose a workspace in the Higgsfield panel, then try again.'
@@ -639,6 +667,9 @@ export function formatHiggsfieldError(err: unknown): string {
     return msg
   }
   const text = String(err)
+  if (isHiggsfieldAuthFailureMessage(text)) {
+    return HIGGSFIELD_RECONNECT_MESSAGE
+  }
   if (text.includes('SyntaxError') && text.includes('JSON')) {
     return 'Higgsfield returned an unexpected response. Details were written to the app log file.'
   }
