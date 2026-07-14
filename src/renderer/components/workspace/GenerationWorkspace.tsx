@@ -30,6 +30,7 @@ import { MediaLightbox } from '../common/MediaLightbox'
 import { Switch } from '../common/Switch'
 import { useProjectTabStore } from '@renderer/stores/projectTabStore'
 import { useHiggsfieldStore } from '@renderer/stores/higgsfieldStore'
+import { isHiggsfieldAuthFailureMessage } from '@shared/higgsfieldAuth'
 import type {
   ProjectGeneration,
   ProjectMedia,
@@ -142,6 +143,7 @@ export function GenerationWorkspace({
   const appendImageAttachment = useProjectTabStore((s) => s.appendImageAttachment)
   const setTabMode = useProjectTabStore((s) => s.setTabMode)
   const loadGenerationIntoTab = useProjectTabStore((s) => s.loadGenerationIntoTab)
+  const loadSegmentIntoTab = useProjectTabStore((s) => s.loadSegmentIntoTab)
   const updateTabDraft = useProjectTabStore((s) => s.updateTabDraft)
   const updateProjectPipelineState = useProjectTabStore((s) => s.updateProjectPipelineState)
   const approveSegmentImage = useProjectTabStore((s) => s.approveSegmentImage)
@@ -163,6 +165,7 @@ export function GenerationWorkspace({
   const selectedWorkspaceId = useHiggsfieldStore((s) => s.selectedWorkspaceId)
   const setSelectedWorkspaceId = useHiggsfieldStore((s) => s.setSelectedWorkspaceId)
   const imageModels = useHiggsfieldStore((s) => s.imageModels)
+  const hfError = useHiggsfieldStore((s) => s.error)
 
   const [error, setError] = useState<string | null>(null)
   const [lightboxItem, setLightboxItem] = useState<ProjectGeneration | null>(null)
@@ -473,11 +476,96 @@ export function GenerationWorkspace({
     patch: Partial<ScriptSegment>
   ): void => {
     const current = getProjectPipeline(projectId)
+    void updatePipeline(projectId, updateSegmentInPipeline(current, segmentId, patch))
+  }
+
+  const handleDownloadSegmentVideo = (segment: ScriptSegment): void => {
+    if (!segment.videoLocalPath || !window.electronAPI?.saveMediaAs) return
+    void window.electronAPI.saveMediaAs({
+      localPath: segment.videoLocalPath,
+      defaultName: `segment-${segment.index + 1}.mp4`
+    })
+  }
+
+  const handleDownloadSegmentImage = (segment: ScriptSegment): void => {
+    if (!window.electronAPI?.saveMediaAs) return
+    const pending = segment.pendingImageApproval
+    const localPath = pending?.localPath ?? segment.imageLocalPath
+    const url = localPath ? undefined : pending?.url
+    if (!localPath && !url) return
+    void window.electronAPI.saveMediaAs({
+      localPath,
+      url,
+      defaultName: `segment-${segment.index + 1}.png`
+    })
+  }
+
+  const handleAttachSegmentImages = async (
+    segmentId: string,
+    files: File[]
+  ): Promise<void> => {
+    if (!window.electronAPI) return
+    const current = getProjectPipeline(projectId)
+    const nextRefs = [...(current.scriptReferences ?? [])]
+    const addedIds: string[] = []
+
+    for (const file of files) {
+      if (!isImageFile(file)) continue
+      try {
+        const path = filePathFromDrop(file)
+        const imported = path
+          ? await window.electronAPI.importProjectMedia(projectId, path)
+          : window.electronAPI.importProjectMediaBytes
+            ? await window.electronAPI.importProjectMediaBytes(
+                projectId,
+                file.name || 'attached-image.png',
+                await file.arrayBuffer()
+              )
+            : null
+        if (!imported) continue
+        const id = generateId()
+        nextRefs.push({
+          id,
+          localPath: imported.localPath,
+          name: imported.name,
+          instruction: ''
+        })
+        addedIds.push(id)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    }
+
+    if (addedIds.length === 0) return
+
+    const segments = current.segments.map((segment) => {
+      if (segment.id !== segmentId) return segment
+      const existing = new Set(segment.scriptReferenceIds ?? [])
+      for (const id of addedIds) existing.add(id)
+      return { ...segment, scriptReferenceIds: [...existing] }
+    })
+
+    await updatePipeline(projectId, {
+      ...current,
+      scriptReferences: nextRefs,
+      segments
+    })
+  }
+
+  const handleRemoveSegmentReference = (segmentId: string, referenceId: string): void => {
+    const current = getProjectPipeline(projectId)
     void updatePipeline(
       projectId,
-      updateSegmentInPipeline(current, segmentId, patch),
-      { debounceMs: 400 }
+      updateSegmentInPipeline(current, segmentId, {
+        scriptReferenceIds: (current.segments.find((s) => s.id === segmentId)
+          ?.scriptReferenceIds ?? []
+        ).filter((id) => id !== referenceId)
+      })
     )
+  }
+
+  const handleOpenSegmentInSidebar = (segmentId: string, media: 'image' | 'video'): void => {
+    void loadSegmentIntoTab(tabId, projectId, segmentId, media)
   }
 
   const handleGenerate = async (): Promise<void> => {
@@ -533,6 +621,25 @@ export function GenerationWorkspace({
                   ...segment,
                   status: 'image_running',
                   imageJobId: job.id,
+                  error: undefined
+                }
+              : segment
+          )
+        })
+      } else if (tabState.regenerateSegmentId && tabState.activeMode === 'video') {
+        const currentProject = useProjectTabStore.getState().projects[projectId]
+        const currentPipeline = normalizePipelineState(
+          currentProject?.pipeline ?? createEmptyPipelineState()
+        )
+        updateProjectPipelineState(projectId, {
+          ...currentPipeline,
+          segments: currentPipeline.segments.map((segment) =>
+            segment.id === tabState.regenerateSegmentId
+              ? {
+                  ...segment,
+                  status: 'video_running',
+                  videoJobId: job.id,
+                  videoMotionPrompt: built.effectivePrompt || segment.videoMotionPrompt,
                   error: undefined
                 }
               : segment
@@ -713,6 +820,22 @@ export function GenerationWorkspace({
                 Exit segment edit
               </button>
             </div>
+          ) : regenerateSegment && mode === 'video' ? (
+            <div className="text-[10px] text-primary rounded border border-primary/30 bg-primary/5 px-2 py-1.5 space-y-1">
+              <p>
+                Segment {regenerateSegment.index + 1} — edit motion prompt or start frame, then
+                regenerate. The new video replaces this segment in the gallery and Videos tab.
+              </p>
+              <button
+                type="button"
+                className="text-muted hover:text-foreground underline"
+                onClick={() =>
+                  updateTabDraft(tabId, { regenerateSegmentId: null, selectedGenerationId: null })
+                }
+              >
+                Exit segment edit
+              </button>
+            </div>
           ) : tabDraft.selectedGenerationId ? (
             <p className="text-[10px] text-primary rounded border border-primary/30 bg-primary/5 px-2 py-1">
               Loaded from gallery — edit and queue to generate a new variant
@@ -720,9 +843,34 @@ export function GenerationWorkspace({
           ) : null}
 
           {status && !status.authenticated && (
-            <Button size="sm" className="w-full" onClick={() => void login()}>
-              <LogIn size={14} className="mr-1" /> Connect Higgsfield
-            </Button>
+            <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-2 space-y-2">
+              <p className="text-[10px] text-amber-700 dark:text-amber-200">
+                {status.statusMessage?.toLowerCase().includes('expired') ||
+                (hfError != null && isHiggsfieldAuthFailureMessage(hfError))
+                  ? 'Higgsfield session expired — reconnect to keep generating.'
+                  : 'Connect Higgsfield to generate images and videos.'}
+              </p>
+              <Button size="sm" className="w-full" onClick={() => void login()}>
+                <LogIn size={14} className="mr-1" /> Reconnect Higgsfield
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="w-full"
+                onClick={() => void refreshHiggsfield()}
+              >
+                <RefreshCw size={14} className="mr-1" /> Refresh account
+              </Button>
+            </div>
+          )}
+
+          {status?.authenticated && hfError && isHiggsfieldAuthFailureMessage(hfError) && (
+            <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-2 space-y-2">
+              <p className="text-[10px] text-amber-700 dark:text-amber-200">{hfError}</p>
+              <Button size="sm" className="w-full" onClick={() => void login()}>
+                <LogIn size={14} className="mr-1" /> Reconnect Higgsfield
+              </Button>
+            </div>
           )}
 
           {status?.authenticated && workspaces.length > 0 && (
@@ -1181,7 +1329,9 @@ export function GenerationWorkspace({
               ? regenerateSegment.pendingImageApproval
                 ? 'Generate again'
                 : `Regenerate segment ${regenerateSegment.index + 1} image`
-              : `Queue ${mode} generation`}
+              : regenerateSegment && mode === 'video'
+                ? `Regenerate segment ${regenerateSegment.index + 1} video`
+                : `Queue ${mode} generation`}
           </Button>
 
           <Button size="sm" variant="outline" className="w-full" onClick={() => void refreshHiggsfield()}>
@@ -1253,8 +1403,16 @@ export function GenerationWorkspace({
                 active={mainTab}
                 segments={pipeline.segments}
                 characters={pipeline.characters}
+                pipeline={pipeline}
+                projectId={projectId}
                 onEditSegment={handleEditPipelineSegment}
                 onRetry={(segmentId, stage) => void retryPipelineSegment(projectId, segmentId, stage)}
+                onDownloadImage={handleDownloadSegmentImage}
+                onDownloadVideo={handleDownloadSegmentVideo}
+                onOpenInSidebar={handleOpenSegmentInSidebar}
+                onApproveSegment={handleApproveSegmentImage}
+                onAttachSegmentImages={handleAttachSegmentImages}
+                onRemoveSegmentReference={handleRemoveSegmentReference}
               />
             </div>
           )}
@@ -1289,7 +1447,7 @@ export function GenerationWorkspace({
               <button
                 type="button"
                 className="rounded-md p-1.5 text-white/85 hover:bg-white/10 hover:text-white"
-                title="Load into sidebar"
+                title="Edit & regenerate in sidebar"
                 onClick={() => {
                   loadGenerationIntoTab(tabId, projectId, lightboxItem)
                   closeLightbox()
