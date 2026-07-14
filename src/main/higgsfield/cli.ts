@@ -11,6 +11,7 @@ import { logError, logWarn } from '../logger'
 import { spawnablePath, packagedNodeModulePath } from '../appPaths'
 import { HiggsfieldCliError } from './errors'
 import { parseHiggsfieldJson } from './json-output'
+import { isHiggsfieldAuthFailureMessage } from '../../shared/higgsfieldAuth'
 
 export { HiggsfieldCliError } from './errors'
 
@@ -347,9 +348,11 @@ export async function isAuthenticated(): Promise<boolean> {
     return true
   } catch (err) {
     if (err instanceof HiggsfieldCliError) {
-      const msg = err.message.toLowerCase()
-      if (msg.includes('not authenticated')) return false
+      if (isHiggsfieldAuthFailureMessage(err.message)) return false
     }
+    // Stale token file can still throw non-auth errors; treat unknown auth failures as logged-out.
+    const msg = err instanceof Error ? err.message : String(err)
+    if (isHiggsfieldAuthFailureMessage(msg)) return false
     return false
   }
 }
