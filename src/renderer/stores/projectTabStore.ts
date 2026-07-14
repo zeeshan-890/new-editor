@@ -212,6 +212,7 @@ export const useProjectTabStore = create<{
   refreshProjectList: () => Promise<void>
   flushProjectSaves: () => Promise<void>
   deleteProjectAndCloseTabs: (projectId: string) => Promise<boolean>
+  deleteProjectsAndCloseTabs: (projectIds: string[]) => Promise<number>
   updateProject: (projectId: string, patch: Partial<GenerationProject>) => void
   mergeProject: (project: GenerationProject) => void
   updateProjectPipelineState: (projectId: string, pipeline: SegmentPipelineState) => void
@@ -534,18 +535,32 @@ export const useProjectTabStore = create<{
   },
 
   deleteProjectAndCloseTabs: async (projectId) => {
-    if (!window.electronAPI?.deleteProject || !window.electronAPI.createProject) return false
-    const ok = await window.electronAPI.deleteProject(projectId)
-    if (!ok) return false
+    const deleted = await get().deleteProjectsAndCloseTabs([projectId])
+    return deleted > 0
+  },
+
+  deleteProjectsAndCloseTabs: async (projectIds) => {
+    if (!window.electronAPI?.deleteProject || !window.electronAPI.createProject) return 0
+    const uniqueIds = [...new Set(projectIds.filter(Boolean))]
+    if (uniqueIds.length === 0) return 0
+
+    const deletedIds: string[] = []
+    for (const projectId of uniqueIds) {
+      const ok = await window.electronAPI.deleteProject(projectId)
+      if (ok) deletedIds.push(projectId)
+    }
+    if (deletedIds.length === 0) return 0
+
+    const deletedSet = new Set(deletedIds)
     let needsFallbackProject = false
     set((state) => {
-      let tabs = state.tabs.filter((tab) => tab.projectId !== projectId)
+      let tabs = state.tabs.filter((tab) => !deletedSet.has(tab.projectId))
       const tabDrafts = { ...state.tabDrafts }
       for (const tab of state.tabs) {
-        if (tab.projectId === projectId) delete tabDrafts[tab.id]
+        if (deletedSet.has(tab.projectId)) delete tabDrafts[tab.id]
       }
       const projects = { ...state.projects }
-      delete projects[projectId]
+      for (const projectId of deletedIds) delete projects[projectId]
       if (tabs.length === 0) {
         needsFallbackProject = true
       }
@@ -566,13 +581,16 @@ export const useProjectTabStore = create<{
         tabs: [fallbackTab],
         activeTabId: fallbackTab.id,
         projects: { ...state.projects, [fallback.id]: fallback },
-        tabDrafts: { ...state.tabDrafts, [fallbackTab.id]: normalizeTabComposerState(fallback.composer) },
+        tabDrafts: {
+          ...state.tabDrafts,
+          [fallbackTab.id]: normalizeTabComposerState(fallback.composer)
+        },
         projectsPageOpen: false
       }))
     }
     scheduleSessionSave(get, get().tabs, get().activeTabId, get().tabDrafts)
     await get().refreshProjectList()
-    return true
+    return deletedIds.length
   },
 
   updateProject: (projectId, patch) => {
@@ -738,16 +756,46 @@ export const useProjectTabStore = create<{
 
     const project = get().projects[projectId]
     const pipeline = project?.pipeline ? normalizePipelineState(project.pipeline) : undefined
-    const segment =
-      pipeline && generation.type === 'image'
-        ? findPipelineSegmentForGeneration(pipeline, generation)
-        : undefined
+    const segment = pipeline ? findPipelineSegmentForGeneration(pipeline, generation) : undefined
 
     let regenerateSegmentId: string | null = null
-    if (segment) {
+    if (segment && generation.type === 'image') {
       regenerateSegmentId = segment.id
       if (segment.imagePrompt.trim()) {
         modeDraft = { ...modeDraft, prompt: segment.imagePrompt }
+      }
+      if (pipeline?.styleLock?.visualStyle && !modeDraft.context.trim()) {
+        modeDraft = { ...modeDraft, context: pipeline.styleLock.visualStyle }
+      }
+      modeDraft = {
+        ...modeDraft,
+        aspectRatio: pipeline?.styleLock?.aspectRatio ?? modeDraft.aspectRatio
+      }
+    } else if (segment && generation.type === 'video') {
+      if (segment.videoMotionPrompt?.trim()) {
+        modeDraft = { ...modeDraft, prompt: segment.videoMotionPrompt }
+      }
+      if (!modeDraft.videoStartFrame && segment.imageLocalPath) {
+        modeDraft = {
+          ...modeDraft,
+          videoStartFrame: {
+            id: `seg-${segment.id}-start`,
+            localPath: segment.imageLocalPath,
+            name: `Segment ${segment.index + 1} start`,
+            previewUrl: localMediaPathUrl(segment.imageLocalPath)
+          }
+        }
+      }
+      if (segment.scriptMatch) {
+        modeDraft = {
+          ...modeDraft,
+          scriptMatch: { ...segment.scriptMatch },
+          durationSource: 'script-audio-match',
+          videoDuration: Math.max(
+            1,
+            Math.ceil((segment.scriptMatch.durationMs || 1000) / 1000)
+          )
+        }
       }
       if (pipeline?.styleLock?.visualStyle && !modeDraft.context.trim()) {
         modeDraft = { ...modeDraft, context: pipeline.styleLock.visualStyle }
@@ -783,6 +831,7 @@ export const useProjectTabStore = create<{
       return { tabDrafts, projects }
     })
   },
+
 
   applyRegeneratedSegmentImage: (projectId, payload) => {
     set((state) => {
@@ -874,6 +923,7 @@ export const useProjectTabStore = create<{
     })
     void get().refreshProjectList()
   },
+
 
   stagePendingSegmentImage: (projectId, payload) => {
     set((state) => {
