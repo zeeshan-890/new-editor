@@ -908,7 +908,7 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       return await listHiggsfieldVoices()
     } catch (err) {
       logError('ipc:higgsfield:voices', err)
-      throw err
+      throw new Error(formatHiggsfieldError(err))
     }
   })
 
