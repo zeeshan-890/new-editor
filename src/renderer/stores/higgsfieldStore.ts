@@ -7,9 +7,14 @@ import type {
   HiggsfieldModelCategory,
   HiggsfieldModelSchema,
   HiggsfieldReferenceImage,
+  HiggsfieldStatus,
   HiggsfieldWorkspace
 } from '@shared/types'
 import { generateId } from '@shared/types'
+import {
+  HIGGSFIELD_RECONNECT_MESSAGE,
+  isHiggsfieldAuthFailureMessage
+} from '@shared/higgsfieldAuth'
 
 const MAX_REFERENCES = 14
 
@@ -118,6 +123,22 @@ const emptyComposer = (): HiggsfieldComposerState => ({
   sourceJobId: undefined
 })
 
+function loggedOutStatus(cliAvailable = true, cliPath?: string): HiggsfieldStatus {
+  return {
+    cliAvailable,
+    authenticated: false,
+    account: null,
+    cliPath,
+    statusMessage: HIGGSFIELD_RECONNECT_MESSAGE
+  }
+}
+
+function authFailureFromUnknown(err: unknown): string | null {
+  const message = err instanceof Error ? err.message : String(err)
+  if (!isHiggsfieldAuthFailureMessage(message)) return null
+  return HIGGSFIELD_RECONNECT_MESSAGE
+}
+
 export const useHiggsfieldStore = create<{
   status: Awaited<ReturnType<NonNullable<typeof window.electronAPI>['getHiggsfieldStatus']>> | null
   models: Awaited<ReturnType<NonNullable<typeof window.electronAPI>['listHiggsfieldModels']>>
@@ -143,6 +164,7 @@ export const useHiggsfieldStore = create<{
 
   refreshStatus: () => Promise<void>
   login: () => Promise<void>
+  markSessionExpired: (message?: string) => void
   loadModels: (category?: HiggsfieldModelCategory) => Promise<void>
   loadModelSchema: (modelId?: string) => Promise<void>
   loadVoices: () => Promise<void>
@@ -187,6 +209,18 @@ export const useHiggsfieldStore = create<{
   statusLoading: false,
   modelSchema: null,
 
+  markSessionExpired: (message = HIGGSFIELD_RECONNECT_MESSAGE) => {
+    const current = get().status
+    set({
+      status: loggedOutStatus(current?.cliAvailable ?? true, current?.cliPath),
+      workspaces: [],
+      selectedWorkspaceId: '',
+      voices: [],
+      error: message,
+      progressMessage: ''
+    })
+  },
+
   refreshStatus: async () => {
     if (!window.electronAPI) {
       set({
@@ -205,8 +239,13 @@ export const useHiggsfieldStore = create<{
       if (typeof window.electronAPI.listHiggsfieldWorkspaces === 'function') {
         try {
           workspaces = await window.electronAPI.listHiggsfieldWorkspaces()
-        } catch {
-          // keep workspaces from status
+        } catch (err) {
+          const authMsg = authFailureFromUnknown(err)
+          if (authMsg) {
+            get().markSessionExpired(authMsg)
+            set({ statusLoading: false })
+            return
+          }
         }
       }
 
@@ -214,20 +253,34 @@ export const useHiggsfieldStore = create<{
       const selectedWorkspaceId =
         status.selectedWorkspace?.id ?? preferred?.id ?? ''
 
-      set({ status, workspaces, selectedWorkspaceId, error: null, statusLoading: false })
+      set({
+        status,
+        workspaces,
+        selectedWorkspaceId,
+        error: status.authenticated
+          ? null
+          : status.statusMessage ?? HIGGSFIELD_RECONNECT_MESSAGE,
+        statusLoading: false
+      })
 
-      if (status.authenticated && selectedWorkspaceId && selectedWorkspaceId !== status.selectedWorkspace?.id) {
+      if (!status.authenticated) return
+
+      if (selectedWorkspaceId && selectedWorkspaceId !== status.selectedWorkspace?.id) {
         await get().setSelectedWorkspaceId(selectedWorkspaceId)
-      } else if (status.authenticated && selectedWorkspaceId && !status.selectedWorkspace) {
+      } else if (selectedWorkspaceId && !status.selectedWorkspace) {
         await get().setSelectedWorkspaceId(selectedWorkspaceId)
       }
 
-      if (status.authenticated) {
-        await get().loadModels('image')
-        await get().loadVoices()
-        await get().syncJobs()
-      }
+      await get().loadModels('image')
+      await get().loadVoices()
+      await get().syncJobs()
     } catch (err) {
+      const authMsg = authFailureFromUnknown(err)
+      if (authMsg) {
+        get().markSessionExpired(authMsg)
+        set({ statusLoading: false })
+        return
+      }
       set({
         status: { cliAvailable: false, authenticated: false, account: null },
         error: String(err),
@@ -238,27 +291,35 @@ export const useHiggsfieldStore = create<{
 
   login: async () => {
     if (!window.electronAPI) return
-    set({ error: null })
+    set({ error: null, progressMessage: 'Opening Higgsfield login…' })
     await window.electronAPI.loginHiggsfield()
-    set({ progressMessage: 'Complete login in your browser, then click Refresh.' })
+    set({
+      progressMessage: 'Complete login in your browser, then click Refresh account.',
+      error: null
+    })
   },
 
   loadModels: async (category = get().category) => {
     if (!window.electronAPI) return
-    const models = await window.electronAPI.listHiggsfieldModels(category)
+    try {
+      const models = await window.electronAPI.listHiggsfieldModels(category)
 
-    if (category === 'image') {
-      set({ imageModels: sortImageModels(models) })
-      return
-    }
-    if (category === 'video') {
-      set({ videoModels: models })
-      return
-    }
+      if (category === 'image') {
+        set({ imageModels: sortImageModels(models) })
+        return
+      }
+      if (category === 'video') {
+        set({ videoModels: models })
+        return
+      }
 
-    const selectedModel = pickDefaultModel(models, get().selectedModel, category)
-    set({ models, selectedModel, category: 'audio' })
-    await get().loadModelSchema(selectedModel)
+      const selectedModel = pickDefaultModel(models, get().selectedModel, category)
+      set({ models, selectedModel, category: 'audio' })
+      await get().loadModelSchema(selectedModel)
+    } catch (err) {
+      const authMsg = authFailureFromUnknown(err)
+      if (authMsg) get().markSessionExpired(authMsg)
+    }
   },
 
   loadModelSchema: async (modelId = get().selectedModel) => {
@@ -276,12 +337,22 @@ export const useHiggsfieldStore = create<{
 
   loadVoices: async () => {
     if (!window.electronAPI) return
-    const voices = await window.electronAPI.listHiggsfieldVoices()
-    set({
-      voices,
-      selectedVoiceId: get().selectedVoiceId || voices[0]?.id || '',
-      selectedVoiceType: voices.find((v) => v.id === get().selectedVoiceId)?.type ?? voices[0]?.type ?? 'preset'
-    })
+    try {
+      const voices = await window.electronAPI.listHiggsfieldVoices()
+      set({
+        voices,
+        selectedVoiceId: get().selectedVoiceId || voices[0]?.id || '',
+        selectedVoiceType:
+          voices.find((v) => v.id === get().selectedVoiceId)?.type ?? voices[0]?.type ?? 'preset'
+      })
+    } catch (err) {
+      const authMsg = authFailureFromUnknown(err)
+      if (authMsg) {
+        get().markSessionExpired(authMsg)
+        return
+      }
+      set({ voices: [] })
+    }
   },
 
   setSelectedWorkspaceId: async (workspaceId) => {
@@ -301,6 +372,11 @@ export const useHiggsfieldStore = create<{
         }))
       }
     } catch (err) {
+      const authMsg = authFailureFromUnknown(err)
+      if (authMsg) {
+        get().markSessionExpired(authMsg)
+        return
+      }
       set({ error: String(err) })
     }
   },
@@ -464,6 +540,11 @@ export const useHiggsfieldStore = create<{
       })
       return job
     } catch (err) {
+      const authMsg = authFailureFromUnknown(err)
+      if (authMsg) {
+        get().markSessionExpired(authMsg)
+        return null
+      }
       const message = err instanceof Error ? err.message : String(err)
       set({ error: message })
       return null
@@ -517,6 +598,12 @@ export const useHiggsfieldStore = create<{
       })
       return result
     } catch (err) {
+      const authMsg = authFailureFromUnknown(err)
+      if (authMsg) {
+        get().markSessionExpired(authMsg)
+        set({ generating: false })
+        return null
+      }
       const message = err instanceof Error ? err.message : String(err)
       set({ error: message, generating: false, progressMessage: '' })
       return null
