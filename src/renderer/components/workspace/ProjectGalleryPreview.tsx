@@ -17,8 +17,10 @@ import { setGalleryDragData } from '@renderer/lib/galleryDrag'
 import { generationVideoSrc } from '@renderer/lib/projectEditorMedia'
 import { useProjectGallery } from '@renderer/hooks/useProjectGallery'
 import {
-  flattenGalleryGenerations,
-  type GalleryEntry
+  flattenGalleryGenerationsForFilter,
+  gallerySectionsForFilter,
+  type GalleryEntry,
+  type GalleryPreviewFilter
 } from '@renderer/lib/projectGallerySections'
 import type { CharacterProfile, ScriptSegment } from '@shared/segmentPipeline'
 import type {
@@ -115,7 +117,7 @@ const MemoGalleryTile = memo(function GalleryTile({
           'absolute top-2 left-2 z-10 rounded bg-black/55 p-1 hover:bg-black/75',
           !checked && 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'
         )}
-        title={checked ? 'Deselect' : 'Select for download'}
+        title={checked ? 'Deselect' : 'Select'}
         onClick={(e) => {
           e.stopPropagation()
           onToggleSelect(item)
@@ -162,7 +164,7 @@ const MemoGalleryTile = memo(function GalleryTile({
         <button
           type="button"
           className="rounded-full bg-black/50 p-1 hover:bg-black/70"
-          title="Load settings into sidebar"
+          title="Edit & regenerate in sidebar"
           onClick={(e) => {
             e.stopPropagation()
             onLoadSettings(item)
@@ -477,6 +479,12 @@ const MemoGalleryEntryTile = memo(function GalleryEntryTile({
   }
 })
 
+const PREVIEW_MEDIA_TABS: Array<{ id: Exclude<GalleryPreviewFilter, 'all'>; label: string }> = [
+  { id: 'characters', label: 'Characters' },
+  { id: 'images', label: 'Images' },
+  { id: 'videos', label: 'Videos' }
+]
+
 export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
   projectId,
   selectedGenerationId,
@@ -497,6 +505,7 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
   onApproveSegment: (segmentId: string) => void
 }): React.JSX.Element {
   const { gallerySections, galleryCounts } = useProjectGallery(projectId)
+  const [mediaTab, setMediaTab] = useState<Exclude<GalleryPreviewFilter, 'all'>>('characters')
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [downloading, setDownloading] = useState(false)
   const [clearingStuck, setClearingStuck] = useState(false)
@@ -510,29 +519,28 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
 
   useEffect(() => {
     setSelectedIds(new Set())
-  }, [projectId])
+  }, [projectId, mediaTab])
+
+  const sections = useMemo(
+    () => gallerySectionsForFilter(gallerySections, mediaTab),
+    [gallerySections, mediaTab]
+  )
 
   const downloadableItems = useMemo(
-    () => flattenGalleryGenerations(gallerySections),
-    [gallerySections]
+    () => flattenGalleryGenerationsForFilter(gallerySections, mediaTab),
+    [gallerySections, mediaTab]
   )
 
   const stuckCount = useMemo(() => {
-    return (
-      gallerySections.characters.filter((e) => e.kind === 'character-running').length +
-      gallerySections.images.filter((e) => e.kind === 'segment-running').length +
-      gallerySections.clips.filter((e) => e.kind === 'segment-running').length
-    )
-  }, [gallerySections])
+    const scoped = sections.flatMap((s) => s.entries)
+    return scoped.filter(
+      (e) => e.kind === 'character-running' || e.kind === 'segment-running'
+    ).length
+  }, [sections])
 
-  const sections = useMemo(
-    () => [
-      { id: 'characters', title: 'Characters', entries: gallerySections.characters },
-      { id: 'images', title: 'Images', entries: gallerySections.images },
-      { id: 'clips', title: 'Clips', entries: gallerySections.clips },
-      { id: 'other', title: 'Other', entries: gallerySections.other }
-    ],
-    [gallerySections]
+  const sectionTotal = useMemo(
+    () => sections.reduce((sum, s) => sum + s.entries.length, 0),
+    [sections]
   )
 
   const handleToggleSelect = useCallback((item: ProjectGeneration) => {
@@ -633,6 +641,21 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
     [deleteProjectGeneration, projectId]
   )
 
+  const handleDeleteSelected = useCallback(() => {
+    const ids = [...selectedIds]
+    if (ids.length === 0) return
+    const ok = window.confirm(
+      ids.length === 1
+        ? 'Delete this item from the preview?'
+        : `Delete all ${ids.length} selected items from the preview? This cannot be undone.`
+    )
+    if (!ok) return
+    for (const id of ids) {
+      deleteProjectGeneration(projectId, id)
+    }
+    setSelectedIds(new Set())
+  }, [deleteProjectGeneration, projectId, selectedIds])
+
   const handleRetryGeneration = useCallback(
     (item: ProjectGeneration) => {
       const project = useProjectTabStore.getState().projects[projectId]
@@ -704,42 +727,105 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
   }
 
   const selectedCount = selectedIds.size
-  const allSelected =
-    downloadableItems.length > 0 && selectedCount === downloadableItems.length
+
+  const emptyLabel =
+    mediaTab === 'characters'
+      ? 'No character anchors yet.'
+      : mediaTab === 'images'
+        ? 'No segment images yet.'
+        : 'No segment videos yet.'
+
+  // Prefer section entry counts so pending tiles show up in the tab badge.
+  const mediaTabCounts = {
+    characters: gallerySections.characters.length,
+    images:
+      gallerySections.images.length +
+      gallerySections.other.filter((entry) => {
+        if (entry.kind !== 'generation' && entry.kind !== 'segment-pending-approval') return true
+        return entry.item.type !== 'video' && !/\.(mp4|webm|mov)(\?|$)/i.test(entry.item.url)
+      }).length,
+    videos:
+      gallerySections.clips.length +
+      gallerySections.other.filter((entry) => {
+        if (entry.kind !== 'generation' && entry.kind !== 'segment-pending-approval') return false
+        return entry.item.type === 'video' || /\.(mp4|webm|mov)(\?|$)/i.test(entry.item.url)
+      }).length
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
+      <div className="flex border-b border-border shrink-0">
+        {PREVIEW_MEDIA_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setMediaTab(tab.id)}
+            className={cn(
+              'shrink-0 px-3 py-1.5 text-xs font-medium transition-colors',
+              mediaTab === tab.id
+                ? 'text-primary border-b-2 border-primary'
+                : 'text-muted hover:text-foreground'
+            )}
+          >
+            {tab.label}
+            {mediaTabCounts[tab.id] > 0 ? (
+              <span className="ml-1 text-[10px] text-muted tabular-nums">
+                {mediaTabCounts[tab.id]}
+              </span>
+            ) : null}
+          </button>
+        ))}
+      </div>
+
       <div className="flex items-center gap-2 shrink-0 flex-wrap">
-        <Button size="sm" variant="outline" onClick={allSelected ? handleClearSelection : handleSelectAll}>
-          {allSelected ? (
-            <>
-              <CheckSquare size={14} className="mr-1" /> Clear selection
-            </>
-          ) : (
-            <>
-              <Square size={14} className="mr-1" /> Select all
-            </>
-          )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={handleSelectAll}
+          disabled={downloadableItems.length === 0}
+        >
+          <Square size={14} className="mr-1" /> Select all
         </Button>
-        {selectedCount > 0 && (
-          <>
-            <Button size="sm" variant="outline" onClick={handleClearSelection}>
-              Clear ({selectedCount})
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => void handleDownloadSelected()}
-              disabled={downloading}
-            >
-              {downloading ? (
-                <Loader2 size={14} className="mr-1 animate-spin" />
-              ) : (
-                <Download size={14} className="mr-1" />
-              )}
-              Download selected ({selectedCount})
-            </Button>
-          </>
-        )}
+        <Button
+          size="sm"
+          variant="destructive"
+          onClick={handleDeleteSelected}
+          disabled={selectedCount === 0}
+          title={
+            selectedCount === 0
+              ? 'Select items to delete'
+              : `Delete ${selectedCount} selected item${selectedCount === 1 ? '' : 's'}`
+          }
+        >
+          <Trash2 size={14} className="mr-1" />
+          {selectedCount > 0 ? `Delete selected (${selectedCount})` : 'Delete selected'}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={handleClearSelection}
+          disabled={selectedCount === 0}
+        >
+          <X size={14} className="mr-1" /> Clear
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => void handleDownloadSelected()}
+          disabled={downloading || selectedCount === 0}
+          title={
+            selectedCount === 0
+              ? 'Select items to download'
+              : `Download ${selectedCount} selected item${selectedCount === 1 ? '' : 's'}`
+          }
+        >
+          {downloading ? (
+            <Loader2 size={14} className="mr-1 animate-spin" />
+          ) : (
+            <Download size={14} className="mr-1" />
+          )}
+          {selectedCount > 0 ? `Download (${selectedCount})` : 'Download'}
+        </Button>
         {stuckCount > 0 && (
           <Button
             size="sm"
@@ -757,15 +843,23 @@ export const ProjectGalleryPreview = memo(function ProjectGalleryPreview({
           </Button>
         )}
         <span className="text-[10px] text-muted">
-          Hover a card and click the checkbox to multi-select
+          Applies to this preview tab only · hover cards to multi-select
         </span>
       </div>
+
       <div className="min-h-0 flex-1">
-        <GalleryVirtualScroll
-          sections={sections}
-          getEntryKey={galleryEntryKey}
-          renderTile={renderTile}
-        />
+        {sectionTotal === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted">
+            <Sparkles size={32} className="text-primary/40" />
+            <p>{emptyLabel}</p>
+          </div>
+        ) : (
+          <GalleryVirtualScroll
+            sections={sections}
+            getEntryKey={galleryEntryKey}
+            renderTile={renderTile}
+          />
+        )}
       </div>
     </div>
   )
