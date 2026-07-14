@@ -49,6 +49,8 @@ export function startBackgroundServices(): () => void {
     printPipelineLog(event)
   })
 
+  // Probe Higgsfield auth/session immediately so expired sessions surface before generate.
+  void useHiggsfieldStore.getState().refreshStatus()
   void useHiggsfieldStore.getState().syncJobs()
 
   for (const [projectId, project] of Object.entries(useProjectTabStore.getState().projects)) {
