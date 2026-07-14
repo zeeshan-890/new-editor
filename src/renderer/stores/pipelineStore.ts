@@ -156,40 +156,18 @@ function trackPipelineJobs(projectId: string, pipeline: SegmentPipelineState): v
   }
 }
 
-const pipelineEditTimers = new Map<string, ReturnType<typeof setTimeout>>()
-
 async function persistPipelineToProject(
   projectId: string,
   pipeline: SegmentPipelineState,
   options?: { immediate?: boolean; debounceMs?: number }
 ): Promise<void> {
   const normalized = normalizePipelineState(pipeline)
-  const immediate = options?.immediate ?? false
-  const debounceMs = options?.debounceMs ?? 0
-
-  const write = async (): Promise<void> => {
-    useProjectTabStore.getState().updateProjectPipelineState(projectId, normalized)
-    if (immediate) {
-      await useProjectTabStore.getState().saveProjectNow(projectId)
-    }
+  // Always apply to local project state immediately so controlled editors (prompt tabs)
+  // update while typing. Project save is already debounced in projectTabStore.
+  useProjectTabStore.getState().updateProjectPipelineState(projectId, normalized)
+  if (options?.immediate) {
+    await useProjectTabStore.getState().saveProjectNow(projectId)
   }
-
-  if (debounceMs <= 0) {
-    await write()
-    return
-  }
-
-  const existing = pipelineEditTimers.get(projectId)
-  if (existing) clearTimeout(existing)
-  await new Promise<void>((resolve) => {
-    pipelineEditTimers.set(
-      projectId,
-      setTimeout(() => {
-        pipelineEditTimers.delete(projectId)
-        void write().finally(resolve)
-      }, debounceMs)
-    )
-  })
 }
 
 export const usePipelineStore = create<{
@@ -318,6 +296,7 @@ export const usePipelineStore = create<{
     }
     set({ pipelineRunning: true, lastError: null })
     try {
+      await useProjectTabStore.getState().saveProjectNow(projectId)
       const pipeline = getProjectPipeline(projectId)
       console.log('[Pipeline] Generate images requested', {
         projectId,
@@ -352,6 +331,7 @@ export const usePipelineStore = create<{
     }
     set({ pipelineRunning: true, lastError: null })
     try {
+      await useProjectTabStore.getState().saveProjectNow(projectId)
       const pipeline = getProjectPipeline(projectId)
       console.log('[Pipeline] Generate videos requested', {
         projectId,
@@ -426,6 +406,8 @@ export const usePipelineStore = create<{
     if (!window.electronAPI?.retryPipelineSegment) return
     set({ pipelineRunning: true, lastError: null })
     try {
+      // Flush prompt/script edits so main loads the latest text before regenerating.
+      await useProjectTabStore.getState().saveProjectNow(projectId)
       const pipeline = await window.electronAPI.retryPipelineSegment(projectId, segmentId, stage)
       get().handlePipelineUpdated(projectId, pipeline)
     } catch (err) {
