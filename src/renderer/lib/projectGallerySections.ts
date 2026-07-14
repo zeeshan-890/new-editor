@@ -123,7 +123,8 @@ function resolveCharacterGeneration(
   }
 }
 
-function resolveSegmentGeneration(
+/** Resolve a pipeline segment into a ProjectGeneration for gallery / composer load. */
+export function resolveSegmentGeneration(
   segment: ScriptSegment,
   media: 'image' | 'video',
   pipeline: SegmentPipelineState,
@@ -170,6 +171,54 @@ function resolveSegmentGeneration(
     createdAt: Date.now(),
     scriptMatch: segment.scriptMatch ?? undefined,
     imageAttachments: imageAttachments?.map((attachment) => ({ ...attachment }))
+  }
+}
+
+/**
+ * Build a generation-shaped payload for opening the sidebar composer even when
+ * media is missing (e.g. NSFW / failed jobs) so the prompt can still be edited.
+ */
+export function segmentToComposerGeneration(
+  segment: ScriptSegment,
+  media: 'image' | 'video',
+  pipeline: SegmentPipelineState,
+  generations: ProjectGeneration[]
+): ProjectGeneration {
+  const existing = resolveSegmentGeneration(segment, media, pipeline, generations)
+  if (existing) return existing
+
+  if (media === 'video') {
+    const startPath = segment.imageLocalPath
+    return {
+      id: segment.videoJobId ?? `${segment.id}-video`,
+      type: 'video',
+      prompt:
+        segment.videoMotionPrompt?.trim() ||
+        `Segment ${segment.index + 1}: ${segment.scriptText}`,
+      model: pipeline.videoModel ?? DEFAULT_VIDEO_MODEL,
+      url: '',
+      createdAt: Date.now(),
+      scriptMatch: segment.scriptMatch ?? undefined,
+      videoStartFrame: startPath
+        ? {
+            id: `seg-${segment.id}-start`,
+            localPath: startPath,
+            name: `Segment ${segment.index + 1} start`,
+            previewUrl: localMediaPathUrl(startPath)
+          }
+        : null
+    }
+  }
+
+  return {
+    id: segment.imageJobId ?? `${segment.id}-image`,
+    type: 'image',
+    prompt: `Segment ${segment.index + 1}: ${segment.scriptText}`,
+    model: pipeline.imageModel ?? DEFAULT_IMAGE_MODEL,
+    url: '',
+    createdAt: Date.now(),
+    imageAttachments: segmentImageAttachments(pipeline, segment).map((a) => ({ ...a })),
+    aspectRatio: pipeline.styleLock?.aspectRatio
   }
 }
 
@@ -373,26 +422,81 @@ export function gallerySectionCounts(sections: ProjectGallerySections): {
   return { characters, images, clips, other, total: characters + images + clips + other }
 }
 
-export function flattenGalleryGenerations(sections: ProjectGallerySections): ProjectGeneration[] {
+export type GalleryPreviewFilter = 'all' | 'characters' | 'images' | 'videos'
+
+function entriesHaveSelectableMedia(entry: GalleryEntry): entry is
+  | { kind: 'generation'; item: ProjectGeneration; badge?: string }
+  | { kind: 'segment-pending-approval'; segment: ScriptSegment; item: ProjectGeneration } {
+  return entry.kind === 'generation' || entry.kind === 'segment-pending-approval'
+}
+
+export function flattenEntryGenerations(entries: GalleryEntry[]): ProjectGeneration[] {
   const items: ProjectGeneration[] = []
   const seen = new Set<string>()
-
-  for (const section of [
-    sections.characters,
-    sections.images,
-    sections.clips,
-    sections.other
-  ]) {
-    for (const entry of section) {
-      if (entry.kind === 'generation' || entry.kind === 'segment-pending-approval') {
-        const item = entry.item
-        if (seen.has(item.id)) continue
-        seen.add(item.id)
-        items.push(item)
-        continue
-      }
-    }
+  for (const entry of entries) {
+    if (!entriesHaveSelectableMedia(entry)) continue
+    if (seen.has(entry.item.id)) continue
+    seen.add(entry.item.id)
+    items.push(entry.item)
   }
-
   return items
+}
+
+export function gallerySectionsForFilter(
+  sections: ProjectGallerySections,
+  filter: GalleryPreviewFilter
+): Array<{ id: string; title: string; entries: GalleryEntry[] }> {
+  const otherImages = sections.other.filter((entry) => {
+    if (!entriesHaveSelectableMedia(entry)) return true
+    return entry.item.type !== 'video' && !/\.(mp4|webm|mov)(\?|$)/i.test(entry.item.url)
+  })
+  const otherVideos = sections.other.filter((entry) => {
+    if (!entriesHaveSelectableMedia(entry)) return false
+    return entry.item.type === 'video' || /\.(mp4|webm|mov)(\?|$)/i.test(entry.item.url)
+  })
+
+  switch (filter) {
+    case 'characters':
+      return [{ id: 'characters', title: 'Characters', entries: sections.characters }]
+    case 'images':
+      return [
+        { id: 'images', title: 'Images', entries: sections.images },
+        ...(otherImages.length > 0
+          ? [{ id: 'other-images', title: 'Other', entries: otherImages }]
+          : [])
+      ]
+    case 'videos':
+      return [
+        { id: 'videos', title: 'Videos', entries: sections.clips },
+        ...(otherVideos.length > 0
+          ? [{ id: 'other-videos', title: 'Other', entries: otherVideos }]
+          : [])
+      ]
+    case 'all':
+    default:
+      return [
+        { id: 'characters', title: 'Characters', entries: sections.characters },
+        { id: 'images', title: 'Images', entries: sections.images },
+        { id: 'videos', title: 'Videos', entries: sections.clips },
+        { id: 'other', title: 'Other', entries: sections.other }
+      ]
+  }
+}
+
+export function flattenGalleryGenerations(sections: ProjectGallerySections): ProjectGeneration[] {
+  return flattenEntryGenerations([
+    ...sections.characters,
+    ...sections.images,
+    ...sections.clips,
+    ...sections.other
+  ])
+}
+
+export function flattenGalleryGenerationsForFilter(
+  sections: ProjectGallerySections,
+  filter: GalleryPreviewFilter
+): ProjectGeneration[] {
+  return flattenEntryGenerations(
+    gallerySectionsForFilter(sections, filter).flatMap((section) => section.entries)
+  )
 }
