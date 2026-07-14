@@ -29,6 +29,7 @@ import {
 import type { SegmentPipelineState } from '@shared/segmentPipeline'
 import { isLegacyDefaultImageModel, shouldUseDefaultImageModel } from '@shared/imageModels'
 import { localMediaPathUrl } from '@renderer/lib/localFileProtocol'
+import { segmentToComposerGeneration } from '@renderer/lib/projectGallerySections'
 
 const saveTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
@@ -222,6 +223,12 @@ export const useProjectTabStore = create<{
   appendImageAttachment: (tabId: string, media: ProjectMedia) => void
   setTabMode: (tabId: string, mode: GenerationMode) => void
   loadGenerationIntoTab: (tabId: string, projectId: string, generation: ProjectGeneration) => Promise<void>
+  loadSegmentIntoTab: (
+    tabId: string,
+    projectId: string,
+    segmentId: string,
+    media?: 'image' | 'video'
+  ) => Promise<void>
   applyRegeneratedSegmentImage: (
     projectId: string,
     payload: {
@@ -233,6 +240,20 @@ export const useProjectTabStore = create<{
       context?: string
       useContextInPrompt?: boolean
       aspectRatio?: string
+    }
+  ) => void
+  applyRegeneratedSegmentVideo: (
+    projectId: string,
+    payload: {
+      segmentId: string
+      replacesGenerationId?: string
+      generation: ProjectGeneration
+      videoMotionPrompt: string
+      context?: string
+      useContextInPrompt?: boolean
+      aspectRatio?: string
+      videoDuration?: number
+      scriptMatch?: ScriptAudioMatch | null
     }
   ) => void
   stagePendingSegmentImage: (
@@ -772,6 +793,7 @@ export const useProjectTabStore = create<{
         aspectRatio: pipeline?.styleLock?.aspectRatio ?? modeDraft.aspectRatio
       }
     } else if (segment && generation.type === 'video') {
+      regenerateSegmentId = segment.id
       if (segment.videoMotionPrompt?.trim()) {
         modeDraft = { ...modeDraft, prompt: segment.videoMotionPrompt }
       }
@@ -832,6 +854,21 @@ export const useProjectTabStore = create<{
     })
   },
 
+  loadSegmentIntoTab: async (tabId, projectId, segmentId, media = 'image') => {
+    const project = get().projects[projectId]
+    if (!project?.pipeline) return
+    const pipeline = normalizePipelineState(project.pipeline)
+    const segment = pipeline.segments.find((s) => s.id === segmentId)
+    if (!segment) return
+
+    const generation = segmentToComposerGeneration(
+      segment,
+      media,
+      pipeline,
+      project.generations
+    )
+    await get().loadGenerationIntoTab(tabId, projectId, generation)
+  },
 
   applyRegeneratedSegmentImage: (projectId, payload) => {
     set((state) => {
@@ -924,6 +961,106 @@ export const useProjectTabStore = create<{
     void get().refreshProjectList()
   },
 
+  applyRegeneratedSegmentVideo: (projectId, payload) => {
+    set((state) => {
+      const project = state.projects[projectId]
+      if (!project?.pipeline) return state
+
+      const pipeline = normalizePipelineState(project.pipeline)
+      const segmentIdx = pipeline.segments.findIndex((s) => s.id === payload.segmentId)
+      if (segmentIdx < 0) return state
+
+      const segment = pipeline.segments[segmentIdx]
+      const removeIds = new Set(
+        [payload.replacesGenerationId, segment.videoJobId, payload.generation.id].filter(Boolean)
+      )
+
+      const galleryPrompt = `Segment ${segment.index + 1}: ${
+        payload.videoMotionPrompt.trim() || segment.scriptText
+      }`
+      const generation: ProjectGeneration = {
+        ...payload.generation,
+        type: 'video',
+        prompt: galleryPrompt,
+        context: payload.context ?? payload.generation.context,
+        useContextInPrompt:
+          payload.useContextInPrompt ?? payload.generation.useContextInPrompt ?? true,
+        aspectRatio: payload.aspectRatio ?? payload.generation.aspectRatio,
+        videoDuration: payload.videoDuration ?? payload.generation.videoDuration,
+        scriptMatch: payload.scriptMatch ?? payload.generation.scriptMatch,
+        videoStartFrame:
+          payload.generation.videoStartFrame ??
+          (segment.imageLocalPath
+            ? {
+                id: `seg-${segment.id}-start`,
+                localPath: segment.imageLocalPath,
+                name: `Segment ${segment.index + 1} start`,
+                previewUrl: localMediaPathUrl(segment.imageLocalPath)
+              }
+            : payload.generation.videoStartFrame)
+      }
+
+      const segments = pipeline.segments.map((s, idx) =>
+        idx === segmentIdx
+          ? {
+              ...s,
+              videoMotionPrompt: payload.videoMotionPrompt,
+              videoJobId: payload.generation.id,
+              videoLocalPath: payload.generation.localPath,
+              status: 'video_done' as const,
+              timelineClipId: undefined,
+              error: undefined
+            }
+          : s
+      )
+
+      const generations = [
+        generation,
+        ...project.generations.filter((item) => !removeIds.has(item.id))
+      ]
+
+      const tabDrafts = { ...state.tabDrafts }
+      for (const tab of state.tabs) {
+        if (tab.kind !== 'generation' || tab.projectId !== projectId) continue
+        const draft = tabDrafts[tab.id]
+        if (!draft) continue
+        tabDrafts[tab.id] = normalizeTabComposerState({
+          ...draft,
+          selectedGenerationId: generation.id,
+          regenerateSegmentId: payload.segmentId,
+          video: {
+            ...draft.video,
+            prompt: payload.videoMotionPrompt,
+            context: payload.context ?? draft.video.context,
+            useContextInPrompt:
+              payload.useContextInPrompt ?? draft.video.useContextInPrompt,
+            aspectRatio: payload.aspectRatio ?? draft.video.aspectRatio,
+            videoDuration: payload.videoDuration ?? draft.video.videoDuration,
+            scriptMatch: payload.scriptMatch ?? draft.video.scriptMatch
+          }
+        })
+      }
+
+      const nextProject = {
+        ...project,
+        generations,
+        pipeline: { ...pipeline, segments },
+        composer:
+          tabDrafts[state.tabs.find((t) => t.id === state.activeTabId)?.id ?? ''] ??
+          project.composer,
+        updatedAt: Date.now()
+      }
+
+      scheduleProjectSave(projectId, get)
+      scheduleSessionSave(get, state.tabs, state.activeTabId, tabDrafts)
+
+      return {
+        projects: { ...state.projects, [projectId]: nextProject },
+        tabDrafts
+      }
+    })
+    void get().refreshProjectList()
+  },
 
   stagePendingSegmentImage: (projectId, payload) => {
     set((state) => {
@@ -1362,6 +1499,20 @@ export const useProjectTabStore = create<{
             imagePrompt: config.prompt,
             config,
             replacesGenerationId: config.replacesGenerationId ?? undefined
+          })
+          return
+        }
+        if (config?.regenerateSegmentId && type === 'video') {
+          get().applyRegeneratedSegmentVideo(projectId, {
+            segmentId: config.regenerateSegmentId,
+            replacesGenerationId: config.replacesGenerationId ?? undefined,
+            generation: resolved,
+            videoMotionPrompt: config.prompt,
+            context: config.context,
+            useContextInPrompt: config.useContextInPrompt,
+            aspectRatio: config.aspectRatio,
+            videoDuration: config.videoDuration,
+            scriptMatch: config.scriptMatch ?? null
           })
           return
         }
