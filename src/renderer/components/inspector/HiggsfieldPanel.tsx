@@ -5,6 +5,7 @@ import { Label } from '../common/Label'
 import { Select } from '../common/Select'
 import { PromptAttachmentZone } from '../preview/PromptAttachmentZone'
 import { useHiggsfieldStore, canSubmitVisualGeneration } from '@renderer/stores/higgsfieldStore'
+import { isHiggsfieldAuthFailureMessage } from '@shared/higgsfieldAuth'
 import type { HiggsfieldModelCategory } from '@shared/types'
 
 interface HiggsfieldPanelProps {
@@ -152,7 +153,10 @@ export function HiggsfieldPanel({
           <div className="flex gap-2">
             {!status.authenticated ? (
               <Button size="sm" className="flex-1" onClick={() => void login()}>
-                <LogIn size={14} className="mr-1" /> Connect
+                <LogIn size={14} className="mr-1" />{' '}
+                {status.statusMessage?.toLowerCase().includes('expired')
+                  ? 'Reconnect'
+                  : 'Connect'}
               </Button>
             ) : null}
             <Button size="sm" variant="outline" onClick={() => void refreshStatus()}>
@@ -166,6 +170,11 @@ export function HiggsfieldPanel({
         <div className="rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-red-300 space-y-2">
           <p>{error.replace(/^Error:\s*/i, '').replace(/^Error invoking remote method '[^']+':\s*/i, '')}</p>
           <div className="flex gap-3">
+            {isHiggsfieldAuthFailureMessage(error) && (
+              <button className="underline text-foreground" onClick={() => void login()}>
+                reconnect
+              </button>
+            )}
             <button className="underline" onClick={() => setError(null)}>
               dismiss
             </button>
