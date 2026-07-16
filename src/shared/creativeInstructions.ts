@@ -76,7 +76,7 @@ export function appendCreativeGuidance(
   if (promptReflectsCreative(base, condensed)) return base
 
   const header = opts?.forDiagram
-    ? 'Creative brief (apply only where compatible with an isolated unlabeled diagram — never add text, people, rooms, or extra visuals):'
+    ? 'Creative brief (apply only to the isolated full-frame diagram look — never add a clinic, room, monitor, TV, screen, people, text, or other visuals):'
     : opts?.forVideo
       ? 'Creative brief for motion/look (honor without inventing unrelated subjects):'
       : 'Creative brief to honor in this shot (weave into look, lighting, props, wardrobe, and composition — do not ignore):'
