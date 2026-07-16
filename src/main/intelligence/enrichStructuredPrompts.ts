@@ -4,7 +4,11 @@ import type {
   LlmAnalyzeSegmentInput
 } from '../../shared/segmentPipeline'
 import type { ParsedScene, ParsedSegmentBlock } from './parseStructuredScript'
-import { classifySceneVisualMode } from '../../shared/pipelinePromptGuards'
+import {
+  classifySceneVisualMode,
+  extractDiagramSubject,
+  MEDICAL_DIAGRAM_PROMPT_PREFIX
+} from '../../shared/pipelinePromptGuards'
 import { enrichAnalysisWithCreative } from './enrichAnalysisWithCreative'
 import { creativeStyleLockHint } from '../../shared/creativeInstructions'
 
@@ -44,26 +48,25 @@ function clipFallbackPrompt(scene: ParsedScene): string {
       ? scene.clips.map((c) => c.description).join('. ')
       : scene.voText
   if (classifySceneVisualMode(clipText, scene.voText) === 'diagram') {
+    const subject = extractDiagramSubject(clipText, scene.voText)
     return [
-      `Unlabeled medical/scientific diagram: ${clipText}.`,
-      'Isolated anatomical or scientific subject only — the ONLY visual in frame, centered, textbook-quality illustration or 3D medical render.',
-      'Empty plain solid neutral background. No other visuals: no text, labels, captions, arrows with words, people, hands, rooms, props, icons, insets, or packaging.'
+      MEDICAL_DIAGRAM_PROMPT_PREFIX,
+      subject,
+      'Isolated full-frame 3D medical render only — NOT a clinic photo, NOT on a monitor/TV/screen.',
+      'Empty plain solid neutral background. No text, labels, people, rooms, or equipment.'
     ].join(' ')
   }
   return `${clipText}. Single unified cinematic frame suitable for image-to-video. Not a collage or multi-panel.`
 }
 
-/** Ensure diagram imagePrompts explicitly ban text/labels/background clutter. */
-function ensureMedicalDiagramPrompt(prompt: string): string {
-  const trimmed = prompt.trim()
-  if (!trimmed) return trimmed
-  const lower = trimmed.toLowerCase()
-  const needsClean =
-    !lower.includes('no text') &&
-    !lower.includes('unlabeled') &&
-    !lower.includes('no label')
-  if (!needsClean) return trimmed
-  return `${trimmed} Unlabeled only: empty plain solid neutral background; nothing else in frame except the single diagram — no text, labels, captions, people, hands, rooms, props, icons, insets, or packaging.`
+/** Ensure diagram imagePrompts lead with 3D medical diagram + anatomy-only subject. */
+function ensureMedicalDiagramPrompt(prompt: string, scriptText = ''): string {
+  const subject = extractDiagramSubject(prompt, scriptText)
+  const body = `Unlabeled full-frame 3D medical diagram of ${subject}. The anatomy IS the image — NOT a clinic photo, NOT on a monitor/TV/screen.`
+  if (/^create\s+3d\s+medical\s+diagram/i.test(prompt.trim())) {
+    return `${MEDICAL_DIAGRAM_PROMPT_PREFIX} ${subject}`
+  }
+  return `${MEDICAL_DIAGRAM_PROMPT_PREFIX} ${body}`
 }
 
 function clipFallbackMotion(scene: ParsedScene): string {
@@ -107,7 +110,7 @@ export function finalizeStructuredSegments(
       let imagePrompt =
         sanitizeGeneratedPrompt(segment.imagePrompt) || clipFallbackPrompt(scene)
       if (classifySceneVisualMode(imagePrompt, scene.voText) === 'diagram') {
-        imagePrompt = ensureMedicalDiagramPrompt(imagePrompt)
+        imagePrompt = ensureMedicalDiagramPrompt(imagePrompt, scene.voText)
       }
       let videoMotionPrompt = sanitizeGeneratedPrompt(segment.videoMotionPrompt ?? '')
       if (!videoMotionPrompt) videoMotionPrompt = clipFallbackMotion(scene)
@@ -198,7 +201,7 @@ export function finalizeStructuredSegmentBlocks(
       let imagePrompt =
         sanitizeGeneratedPrompt(block.imagePrompt) || block.imagePrompt
       if (classifySceneVisualMode(imagePrompt, block.scriptText) === 'diagram') {
-        imagePrompt = ensureMedicalDiagramPrompt(imagePrompt)
+        imagePrompt = ensureMedicalDiagramPrompt(imagePrompt, block.scriptText)
       }
       let videoMotionPrompt = sanitizeGeneratedPrompt(segment.videoMotionPrompt ?? '')
       if (!videoMotionPrompt) videoMotionPrompt = segmentFallbackMotion(block)
