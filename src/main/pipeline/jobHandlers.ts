@@ -16,7 +16,13 @@ import { applyVideoSoundParams } from '../../shared/videoGeneration'
 import {
   buildSegmentImageReferences
 } from '../../shared/pipelineImageRefs'
-import { appendSceneVisualGuards, buildMedicalDiagramImagePrompt, classifySceneVisualMode } from '../../shared/pipelinePromptGuards'
+import {
+  appendSceneVisualGuards,
+  buildMedicalDiagramImagePrompt,
+  classifySceneVisualMode,
+  extractDiagramSubject,
+  MEDICAL_DIAGRAM_PROMPT_PREFIX
+} from '../../shared/pipelinePromptGuards'
 import { appendCreativeGuidance } from '../../shared/creativeInstructions'
 
 export { buildSegmentImageReferences } from '../../shared/pipelineImageRefs'
@@ -78,20 +84,12 @@ export function buildSegmentImagePrompt(
   const creative = pipeline.creativeInstructions
 
   // Medical / scientific diagrams: isolated subject only — never add lifestyle setting,
-  // characters, or cinematic room framing (those cause text labels and busy backgrounds).
+  // characters, styleLock clinic look, or creative brief that reintroduces rooms/screens.
   if (mode === 'diagram') {
-    const refHint = attachedReferenceHint(segment, pipeline)
-    const styleHint = pipeline.styleLock.visualStyle?.trim()
-    const subject = [
-      segment.imagePrompt.trim(),
-      styleHint ? `Look / style: ${styleHint}` : '',
-      refHint
-    ]
-      .filter(Boolean)
-      .join('\n\n')
-    return appendCreativeGuidance(buildMedicalDiagramImagePrompt(subject), creative, {
-      forDiagram: true
-    })
+    return buildMedicalDiagramImagePrompt(
+      segment.imagePrompt,
+      segment.scriptText
+    )
   }
 
   const characters = pipeline.characters
@@ -152,10 +150,8 @@ function isWeakVideoMotion(motion: string): boolean {
 
 function deriveMotionFromSegment(segment: ScriptSegment): string {
   if (classifySceneVisualMode(segment.imagePrompt, segment.scriptText) === 'diagram') {
-    const clipHint = segment.imagePrompt?.trim().slice(0, 160)
-    return clipHint
-      ? `Slow cinematic orbit and gentle push-in around the medical diagram (${clipHint}). Soft lighting shift across the structure; keep the diagram unlabeled on a plain background — no text appearing.`
-      : 'Slow cinematic orbit and gentle push-in around the medical diagram on a plain background. Soft lighting drift; keep it unlabeled — no text appearing.'
+    const subject = extractDiagramSubject(segment.imagePrompt, segment.scriptText)
+    return `Slow cinematic orbit and gentle push-in around ${subject}. Soft lighting drift; keep unlabeled on a plain background — no text, clinic, or screen appearing.`
   }
   const clipHint = segment.imagePrompt?.trim().slice(0, 160)
   if (clipHint) {
@@ -238,17 +234,14 @@ export function buildSegmentVideoPrompt(
   const creative = pipeline.creativeInstructions
 
   if (mode === 'diagram') {
+    const subject = extractDiagramSubject(segment.imagePrompt, segment.scriptText)
     const parts = [
-      motion,
-      'Animate this medical diagram still into video: slow orbit or push-in, subtle lighting change, structure stays sharp and centered.',
-      attachedReferenceHint(segment, pipeline),
-      'Keep the diagram as the ONLY visual on an empty plain neutral background for the full duration — never introduce text, labels, people, props, rooms, insets, or any other visuals.'
+      MEDICAL_DIAGRAM_PROMPT_PREFIX,
+      `Animate only this 3D medical diagram: ${subject}`,
+      'Slow orbit or push-in, subtle lighting change, structure stays sharp and centered.',
+      'Keep the anatomical diagram as the ONLY full-frame visual on an empty plain neutral background for the full duration — never introduce a clinic, monitor, TV, screen, text, labels, people, props, rooms, insets, or any other visuals.'
     ].filter(Boolean)
-    const withCreative = appendCreativeGuidance(parts.join('\n\n'), creative, {
-      forVideo: true,
-      forDiagram: true
-    })
-    return appendSceneVisualGuards(withCreative, segment.imagePrompt, segment.scriptText, {
+    return appendSceneVisualGuards(parts.join('\n\n'), segment.imagePrompt, segment.scriptText, {
       forVideo: true
     })
   }
