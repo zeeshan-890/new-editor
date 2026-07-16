@@ -52,7 +52,6 @@ export function HiggsfieldPanel({
   const setError = useHiggsfieldStore((s) => s.setError)
   const generate = useHiggsfieldStore((s) => s.generate)
   const enqueueGeneration = useHiggsfieldStore((s) => s.enqueueGeneration)
-  const setSelectedWorkspaceId = useHiggsfieldStore((s) => s.setSelectedWorkspaceId)
 
   useEffect(() => {
     void refreshStatus()
@@ -192,27 +191,31 @@ export function HiggsfieldPanel({
         <>
           <div>
             <Label>Workspace</Label>
-            {workspaces.length === 0 ? (
+            {status.selectedWorkspace || activeWorkspaceId ? (
               <p className="text-xs text-muted mt-1">
-                No workspaces loaded. Click <strong>Refresh</strong> above.
+                Active:{' '}
+                <span className="text-foreground">
+                  {status.selectedWorkspace?.name ||
+                    workspaces.find((w) => w.id === activeWorkspaceId)?.name ||
+                    '—'}
+                </span>
+                {(
+                  status.selectedWorkspace?.name ||
+                  workspaces.find((w) => w.id === activeWorkspaceId)?.name ||
+                  ''
+                )
+                  .toLowerCase()
+                  .includes('ledisa')
+                  ? ' ✓'
+                  : ''}
+                <span className="block text-[10px] mt-0.5">
+                  Change workspace in the Pipeline sidebar.
+                </span>
               </p>
             ) : (
-              <>
-                <Select
-                  value={activeWorkspaceId}
-                  onChange={(id) => void setSelectedWorkspaceId(id)}
-                  options={workspaces.map((ws) => ({
-                    value: ws.id,
-                    label: `${ws.name} (${Math.floor(ws.credits).toLocaleString()} credits · ${ws.planType})`
-                  }))}
-                />
-                {status.selectedWorkspace && (
-                  <p className="text-[10px] text-muted mt-1">
-                    Active: {status.selectedWorkspace.name}
-                    {status.selectedWorkspace.name.toLowerCase().includes('ledisa') ? ' ✓' : ''}
-                  </p>
-                )}
-              </>
+              <p className="text-xs text-muted mt-1">
+                No workspace selected. Open the Pipeline sidebar to choose one.
+              </p>
             )}
           </div>
 
