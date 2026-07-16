@@ -72,6 +72,8 @@ import { alignScriptAudio } from '../alignment/alignScript'
 import { batchMatchScriptAudio } from '../alignment/batchMatchScript'
 import { analyzeScript } from '../intelligence/analyzeScript'
 import { applyAnalysisToPipeline } from '../intelligence/applyAnalysis'
+import { enrichScriptPartsWithAgents } from '../intelligence/agents/enrichScriptParts'
+import { createOpenAiCompatibleProvider } from '../llm/openaiCompatible'
 import { loadLlmSettings, saveLlmSettings } from '../llm/settings'
 import {
   loadAssemblyAiSettings,
@@ -98,7 +100,10 @@ import { setPipelineLogCallback, pipelineDebugLog } from '../pipeline/debugLog'
 import {
   normalizePipelineState,
   createEmptyPipelineState,
-  normalizeLoadedGenerationProject
+  normalizeLoadedGenerationProject,
+  applyScriptPartsToPipeline,
+  scriptPartsToFullScript,
+  type SegmentPipelineState
 } from '../../shared/segmentPipeline'
 import type { LlmSettings } from '../../shared/segmentPipeline'
 
@@ -116,6 +121,68 @@ async function loadPresetsFile(): Promise<Preset[]> {
   } catch {
     return []
   }
+}
+
+async function applyPartsEnrichAndSave(
+  project: GenerationProject,
+  base: SegmentPipelineState,
+  projectId: string
+): Promise<GenerationProject> {
+  // Persist user-entered parts first so Build failures never lose authoring data.
+  const parts = base.scriptParts ?? []
+  if (parts.length === 0 || !parts.some((p) => p.scriptText.trim())) {
+    throw new Error('Add at least one script part with text before building.')
+  }
+
+  const draftPipeline: SegmentPipelineState = {
+    ...base,
+    scriptMode: 'parts',
+    scriptParts: parts,
+    fullScript: scriptPartsToFullScript(parts)
+  }
+  await saveProject({ ...project, pipeline: draftPipeline, updatedAt: Date.now() })
+
+  const settings = await loadLlmSettings()
+  const provider = createOpenAiCompatibleProvider(settings)
+  const enriched = await enrichScriptPartsWithAgents(provider, {
+    parts,
+    creativeInstructions: base.creativeInstructions,
+    references: (base.scriptReferences ?? []).map((ref) => ({
+      id: ref.id,
+      name: ref.name,
+      instruction: ref.instruction
+    }))
+  })
+
+  const pipeline = applyScriptPartsToPipeline(
+    {
+      ...draftPipeline,
+      scriptParts: enriched.parts,
+      fullScript: scriptPartsToFullScript(enriched.parts),
+      creativeInstructions: base.creativeInstructions,
+      scriptReferences: base.scriptReferences,
+      imageModel: base.imageModel ?? project.selectedImageModel,
+      videoModel: base.videoModel ?? project.selectedVideoModel,
+      workspaceId: base.workspaceId ?? project.workspaceId
+    },
+    enriched.analysis
+  )
+
+  pipelineDebugLog(projectId, 'step', 'analyze', 'Parts multi-agent enrich complete', {
+    segmentCount: pipeline.segments.length,
+    characterCount: pipeline.characters.length,
+    scriptReferences: pipeline.scriptReferences?.length ?? 0,
+    agents: enriched.trace.agents.map((a) => `${a.agent}:${a.ok ? 'ok' : 'fail'}`),
+    segments: pipeline.segments.map((s) => ({
+      n: s.index + 1,
+      script: s.scriptText.slice(0, 80),
+      imagePrompt: s.imagePrompt.slice(0, 120),
+      videoMotion: s.videoMotionPrompt?.slice(0, 80),
+      sourceClipId: s.sourceClipId,
+      scriptReferenceIds: s.scriptReferenceIds
+    }))
+  })
+  return saveProject({ ...project, pipeline, updatedAt: Date.now() })
 }
 
 export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void {
@@ -385,12 +452,18 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
       const loaded = await loadProject(payload.projectId)
       if (!loaded) throw new Error('Project not found.')
       const project = normalizeLoadedGenerationProject(loaded)
-      const script = payload.script.trim()
-      if (!script) throw new Error('Script is empty.')
-
       const base = normalizePipelineState(
         payload.pipeline ?? project.pipeline ?? createEmptyPipelineState()
       )
+
+      // Parts mode: keep user parts on disk and enrich via multi-agents.
+      if (base.scriptMode === 'parts') {
+        return applyPartsEnrichAndSave(project, base, payload.projectId)
+      }
+
+      const script = payload.script.trim() || base.fullScript.trim()
+      if (!script) throw new Error('Script is empty.')
+
       const analysis = await analyzeScript({
         script,
         creativeInstructions: base.creativeInstructions,
@@ -432,6 +505,25 @@ export function registerIpcHandlers(getWindow: () => BrowserWindow | null): void
         }))
       })
       return saveProject({ ...project, pipeline, updatedAt: Date.now() })
+    }
+  )
+
+  ipcMain.handle(
+    IPC.PROJECT_APPLY_PIPELINE_PARTS,
+    async (
+      _e,
+      payload: {
+        projectId: string
+        pipeline?: import('../../shared/segmentPipeline').SegmentPipelineState
+      }
+    ) => {
+      const loaded = await loadProject(payload.projectId)
+      if (!loaded) throw new Error('Project not found.')
+      const project = normalizeLoadedGenerationProject(loaded)
+      const base = normalizePipelineState(
+        payload.pipeline ?? project.pipeline ?? createEmptyPipelineState()
+      )
+      return applyPartsEnrichAndSave(project, base, payload.projectId)
     }
   )
 
