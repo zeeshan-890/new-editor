@@ -192,6 +192,13 @@ export const usePipelineStore = create<{
       scriptReferences?: import('@shared/segmentPipeline').PipelineScriptReference[]
     }
   ) => Promise<void>
+  enrichAndApplyScriptParts: (
+    projectId: string,
+    brief?: {
+      creativeInstructions?: string
+      scriptReferences?: import('@shared/segmentPipeline').PipelineScriptReference[]
+    }
+  ) => Promise<void>
   updatePipeline: (projectId: string, pipeline: SegmentPipelineState, options?: { immediate?: boolean; debounceMs?: number }) => Promise<void>
   startPipelineImages: (projectId: string) => Promise<void>
   startPipelineVideos: (projectId: string) => Promise<void>
@@ -276,6 +283,61 @@ export const usePipelineStore = create<{
       console.log('[Pipeline] Analyze complete — segments saved to project', {
         segments: pipeline.segments.length,
         characters: pipeline.characters.length
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      set({ lastError: message })
+      throw err
+    } finally {
+      set({ analyzing: false })
+    }
+  },
+
+  enrichAndApplyScriptParts: async (projectId, brief) => {
+    const api = window.electronAPI
+    if (!api?.applyPipelineParts && !api?.applyPipelineAnalysis) {
+      throw new Error('Pipeline analysis is unavailable. Restart the Electron app (npm run dev).')
+    }
+    set({ analyzing: true, lastError: null })
+    try {
+      const current = getProjectPipeline(projectId)
+      const projectMeta = useProjectTabStore.getState().projects[projectId]
+      const fullScript =
+        current.fullScript.trim() ||
+        (current.scriptParts ?? [])
+          .map((p) => p.scriptText.trim())
+          .filter(Boolean)
+          .join('\n\n')
+      const pipelineBase = {
+        ...current,
+        scriptMode: 'parts' as const,
+        fullScript,
+        creativeInstructions: brief?.creativeInstructions ?? current.creativeInstructions ?? '',
+        scriptReferences: brief?.scriptReferences ?? current.scriptReferences ?? [],
+        imageModel: current.imageModel ?? projectMeta?.selectedImageModel ?? DEFAULT_IMAGE_MODEL,
+        videoModel: current.videoModel ?? projectMeta?.selectedVideoModel ?? DEFAULT_VIDEO_MODEL,
+        workspaceId: current.workspaceId ?? projectMeta?.workspaceId
+      }
+
+      // Always persist authoring data before enrich (survives enrich failures / missing IPC).
+      await persistPipelineToProject(projectId, pipelineBase, { immediate: true })
+
+      console.log('[Pipeline] Parts multi-agent enrich requested', {
+        projectId,
+        parts: pipelineBase.scriptParts?.length ?? 0
+      })
+
+      const project = api.applyPipelineParts
+        ? await api.applyPipelineParts(projectId, pipelineBase)
+        : await api.applyPipelineAnalysis!(projectId, fullScript, pipelineBase)
+
+      useProjectTabStore.getState().mergeProject(project)
+      await useProjectTabStore.getState().saveProjectNow(projectId)
+      const pipeline = getProjectPipeline(projectId)
+      printPipelineStateUpdate(projectId, pipeline)
+      console.log('[Pipeline] Parts enrich complete — segments saved', {
+        segments: pipeline.segments.length,
+        parts: pipeline.scriptParts?.length ?? 0
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
