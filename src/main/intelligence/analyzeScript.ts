@@ -25,6 +25,11 @@ import {
   finalizeStructuredSegments
 } from './enrichStructuredPrompts'
 import { enrichAnalysisWithCreative } from './enrichAnalysisWithCreative'
+import { orchestrateMultiAgentAnalyze } from './agents/orchestrateMultiAgentAnalyze'
+
+/** Freeform scripts use LangGraph multi-agent analyze; structured scripts keep legacy path. */
+export const USE_MULTI_AGENT_FREEFORM_ANALYZE = true
+export const USE_LANGGRAPH_ANALYZE = true
 
 const FREEFORM_SYSTEM_PROMPT = `You are a professional script-to-storyboard analyst for video production.
 
@@ -73,12 +78,14 @@ Image prompt rules:
 - Focus the frame on ONLY this segment's beat (do not cram the whole sentence's other beats into the same image)
 - Never ask for character sheets, reference boards, turnaround views, contact sheets, split panels, or collages
 - Live-action/lifestyle scenes: never add floating medical diagrams, holographic anatomy, HUD panels, X-ray overlays, or educational infographic layers unless the beat is explicitly a diagram
-- MEDICAL / DIAGRAM scenes (when the beat is an anatomy diagram, organ, cross-section, medical illustration, scan, or scientific visualization):
-  - imagePrompt must describe ONLY the diagram subject (e.g. "unlabeled 3D anatomical diagram of a human kidney, accurate medical illustration")
+- MEDICAL / DIAGRAM scenes (when the beat is an anatomy diagram, organ, tooth, cross-section, medical illustration, scan, or scientific visualization):
+  - ALWAYS start imagePrompt with exactly: "Create 3D medical diagram, no text, no label."
+  - Then describe ONLY the diagram subject itself (e.g. "Create 3D medical diagram, no text, no label. Unlabeled 3D anatomical cross-section of a human molar tooth showing enamel, dentin, and pulp")
+  - The diagram IS the full image — NEVER a clinic photo, NEVER a diagram on a monitor/TV/screen/wall
   - Empty plain solid neutral background — the diagram is the ONLY visual in the entire frame
-  - No other visuals of any kind: no props, icons, insets, charts, secondary objects, rooms, furniture, people, hands, packaging
+  - No other visuals of any kind: no props, icons, insets, charts, secondary objects, rooms, furniture, people, hands, packaging, dental chairs, or equipment
   - Explicitly forbid text: no labels, captions, titles, arrows with words, callouts, watermarks, or UI
-  - Single isolated diagram, textbook-quality, centered — nothing else in frame
+  - Single isolated 3D medical diagram, textbook-quality, centered — nothing else in frame
 - Prefer medium or wide shots with environmental context for live scenes; for diagrams prefer centered isolated subject
 - 40-120 words per imagePrompt
 
@@ -159,7 +166,7 @@ Hard rules:
 3. Never create one segment per Clip.
 4. imagePrompt: one unified still (40-140 words) from clips + only applicable synthesized guidance.
    - Live scenes: cinematic frame; must not invent floating medical/HUD overlays.
-   - MEDICAL / DIAGRAM scenes (anatomy, organ, cross-section, medical illustration, scan, scientific viz): describe ONLY the unlabeled diagram subject on an empty plain solid neutral background. The diagram is the ONLY visual in frame — NO other visuals, text, labels, captions, people, hands, rooms, props, icons, insets, packaging, or extra diagrams. Textbook-quality isolated medical diagram.
+   - MEDICAL / DIAGRAM scenes (anatomy, organ, tooth, cross-section, medical illustration, scan, scientific viz): ALWAYS start imagePrompt with "Create 3D medical diagram, no text, no label." then describe ONLY the unlabeled 3D diagram subject filling the frame on an empty plain solid neutral background. The diagram IS the image — NEVER a clinic/office photo and NEVER a diagram displayed on a monitor, TV, or screen. NO other visuals, text, labels, captions, people, hands, rooms, props, icons, insets, packaging, or extra diagrams.
 5. videoMotionPrompt: REQUIRED concrete motion from clips (1-2 sentences): specific subject actions + camera move. Never "subtle/gentle only". No instruction dumps. No filenames. For diagram scenes: slow orbit/push-in around the diagram — never invent people or on-screen text.
 6. Extract characters with snake_case ids, role, description.
 7. continuityFromPrevious: true only for direct visual continuations.
@@ -471,6 +478,23 @@ export async function analyzeScript(
     }
   }
 
+  // Freeform: multi-agent pipeline (creative → refs → segment → image → video)
+  if (USE_MULTI_AGENT_FREEFORM_ANALYZE) {
+    try {
+      const { analysis, trace } = await orchestrateMultiAgentAnalyze(provider, normalized)
+      console.log('[Pipeline · analyze] Freeform multi-agent complete', {
+        segments: analysis.segments.length,
+        creativeInstructions: Boolean(normalized.creativeInstructions?.trim()),
+        agents: trace.agents.map((a) => `${a.agent}:${a.ok ? 'ok' : 'fail'}`)
+      })
+      return analysis
+    } catch (multiErr) {
+      console.warn('[Pipeline · analyze] Multi-agent failed — falling back to legacy single-call', {
+        error: multiErr instanceof Error ? multiErr.message : String(multiErr)
+      })
+    }
+  }
+
   const userMessage = buildUserMessage(normalized)
 
   const attempt = async (extraUserNote?: string): Promise<LlmAnalyzeResult> => {
@@ -510,7 +534,7 @@ export async function analyzeScript(
         // Keep the first valid result if the fine-split retry fails validation.
       }
     }
-    console.log('[Pipeline · analyze] Freeform analysis complete', {
+    console.log('[Pipeline · analyze] Freeform analysis complete (legacy)', {
       segments: result.segments.length,
       creativeInstructions: Boolean(normalized.creativeInstructions?.trim())
     })
