@@ -24,12 +24,21 @@ import {
   finalizeStructuredSegmentBlocks,
   finalizeStructuredSegments
 } from './enrichStructuredPrompts'
+import { enrichAnalysisWithCreative } from './enrichAnalysisWithCreative'
 
 const FREEFORM_SYSTEM_PROMPT = `You are a professional script-to-storyboard analyst for video production.
 
 Your task: analyze a narration script and split it into the MAXIMUM number of short visual segments. Prefer MORE segments over fewer. Each segment must be the smallest useful narration beat that can be shown as ONE animatable scene frame (one unified photograph — never a character sheet, reference board, or multi-panel collage).
 
-The user may also provide creative instructions (separate from the script) and reference images with per-image usage notes. Treat creative instructions as a free-form runtime rulebook: interpret what each part means, apply only the parts that fit each segment's visual context, and synthesize them into natural prompt language. Never paste creative instructions or reference filenames/usage notes verbatim into prompts. Assign reference ids only to segments where that image should guide generation.
+The user may also provide creative instructions (separate from the script) and reference images with per-image usage notes.
+
+CREATIVE INSTRUCTIONS (critical for freeform scripts):
+- Treat them as a free-form runtime rulebook that MUST shape the visuals
+- For EVERY segment, weave the relevant creative rules into imagePrompt as natural visual language (look, lighting, wardrobe, props, color, camera, brand tone, diagram style, forbidden elements)
+- Apply only the parts that fit that segment's beat — but do not skip the brief entirely; most segments should clearly reflect the creative look
+- Never paste the full creative-instructions block verbatim and never write labels like "Creative direction:" or "Keep creative direction:"
+- Process/pipeline notes (e.g. "first generate images then videos") are NOT visual content — ignore those when writing prompts
+- Assign reference ids only to segments where that image should guide generation
 
 Segmentation rules (fine-grain — critical):
 - Default to the SHORTEST possible segment: ideally one clause, one subject, or one concrete visual beat (~3–18 words of scriptText)
@@ -64,8 +73,13 @@ Image prompt rules:
 - Focus the frame on ONLY this segment's beat (do not cram the whole sentence's other beats into the same image)
 - Never ask for character sheets, reference boards, turnaround views, contact sheets, split panels, or collages
 - Live-action/lifestyle scenes: never add floating medical diagrams, holographic anatomy, HUD panels, X-ray overlays, or educational infographic layers unless the beat is explicitly a diagram
-- Diagram/scientific scenes: clean single-subject visualization only — no people, faces, bathroom/kitchen lifestyle sets, or extra unrelated diagrams unless the beat requires them
-- Prefer medium or wide shots with environmental context
+- MEDICAL / DIAGRAM scenes (when the beat is an anatomy diagram, organ, cross-section, medical illustration, scan, or scientific visualization):
+  - imagePrompt must describe ONLY the diagram subject (e.g. "unlabeled 3D anatomical diagram of a human kidney, accurate medical illustration")
+  - Empty plain solid neutral background — the diagram is the ONLY visual in the entire frame
+  - No other visuals of any kind: no props, icons, insets, charts, secondary objects, rooms, furniture, people, hands, packaging
+  - Explicitly forbid text: no labels, captions, titles, arrows with words, callouts, watermarks, or UI
+  - Single isolated diagram, textbook-quality, centered — nothing else in frame
+- Prefer medium or wide shots with environmental context for live scenes; for diagrams prefer centered isolated subject
 - 40-120 words per imagePrompt
 
 Reference image rules:
@@ -77,6 +91,7 @@ Reference image rules:
 Video motion (required per segment):
 - 1–2 sentences of CONCRETE motion for image-to-video (who moves, how hands/face change, camera push-in/orbit/pan)
 - NEVER write only "subtle", "gentle", or "minimal motion" — models treat that as nearly static
+- Medical/diagram segments: slow orbit or push-in around the diagram; soft lighting drift; never invent people or on-screen text/labels appearing
 - No creative-instruction dumps
 
 continuityFromPrevious: true only when the scene is a direct visual continuation of the previous segment (same location, continuous action).
@@ -142,8 +157,10 @@ Hard rules:
 1. Return EXACTLY one segment per Scene, same count and order.
 2. scriptText MUST equal the provided VO text.
 3. Never create one segment per Clip.
-4. imagePrompt: one unified cinematic still (40-140 words) from clips + only applicable synthesized guidance. Live scenes must not invent floating medical/HUD overlays; diagram scenes must stay clean (no people/lifestyle set dressing unless specified).
-5. videoMotionPrompt: REQUIRED concrete motion from clips (1-2 sentences): specific subject actions + camera move. Never "subtle/gentle only". No instruction dumps. No filenames.
+4. imagePrompt: one unified still (40-140 words) from clips + only applicable synthesized guidance.
+   - Live scenes: cinematic frame; must not invent floating medical/HUD overlays.
+   - MEDICAL / DIAGRAM scenes (anatomy, organ, cross-section, medical illustration, scan, scientific viz): describe ONLY the unlabeled diagram subject on an empty plain solid neutral background. The diagram is the ONLY visual in frame — NO other visuals, text, labels, captions, people, hands, rooms, props, icons, insets, packaging, or extra diagrams. Textbook-quality isolated medical diagram.
+5. videoMotionPrompt: REQUIRED concrete motion from clips (1-2 sentences): specific subject actions + camera move. Never "subtle/gentle only". No instruction dumps. No filenames. For diagram scenes: slow orbit/push-in around the diagram — never invent people or on-screen text.
 6. Extract characters with snake_case ids, role, description.
 7. continuityFromPrevious: true only for direct visual continuations.
 8. styleLock.visualStyle / setting should reflect overall look inferred from the brief + script (synthesized, not pasted).
@@ -191,7 +208,7 @@ Your job (critical):
 1. Return EXACTLY one segment per Segment block, same count and order.
 2. scriptText MUST equal the provided Script text exactly.
 3. imagePrompt MUST equal the provided V0 Prompt text exactly.
-4. Write videoMotionPrompt from the V0 Prompt: concrete subject + camera motion (1-2 sentences). Never "subtle/gentle only".
+4. Write videoMotionPrompt from the V0 Prompt: concrete subject + camera motion (1-2 sentences). Never "subtle/gentle only". If the V0 Prompt is a medical/scientific diagram, use slow orbit/push-in around the diagram and never invent people or on-screen text.
 5. Extract characters with snake_case ids, role, description from Script + V0 Prompt.
 6. Apply creative instructions / references via reasoning: synthesize into videoMotionPrompt / character descriptions / styleLock only — NEVER paste verbatim, NEVER rewrite scriptText or imagePrompt.
 7. Put reference ids in segment.referenceIds only when that image should guide generation.
@@ -290,12 +307,17 @@ function buildFineSplitRetryNote(result: LlmAnalyzeResult): string {
 
 function buildUserMessage(input: AnalyzeScriptInput): string {
   const script = input.script.trim()
+  const hasCreative = Boolean(input.creativeInstructions?.trim())
   const parts: string[] = [
     'Split this narration into the MAXIMUM number of short visual segments (prefer over-splitting).',
-    'Lists, examples, and compound sentences must become separate segments.',
-    '',
-    script
+    'Lists, examples, and compound sentences must become separate segments.'
   ]
+  if (hasCreative) {
+    parts.push(
+      'CREATIVE INSTRUCTIONS are provided below — you MUST synthesize relevant rules into EVERY segment imagePrompt (and styleLock.visualStyle). Do not ignore the brief.'
+    )
+  }
+  parts.push('', script)
   appendBriefSections(parts, input)
   return parts.join('\n\n')
 }
@@ -390,7 +412,10 @@ export async function analyzeScript(
       try {
         return await attempt(formatValidationError(firstErr))
       } catch {
-        return buildDeterministicSegmentBlockResult(structuredBlocks, normalized)
+        return enrichAnalysisWithCreative(
+          buildDeterministicSegmentBlockResult(structuredBlocks, normalized),
+          normalized.creativeInstructions
+        )
       }
     }
   }
@@ -438,7 +463,10 @@ export async function analyzeScript(
         return await attempt(formatValidationError(firstErr))
       } catch {
         // Always keep Scene/VO structure; still bake creative + refs into prompts.
-        return buildDeterministicStructuredResult(structuredScenes, normalized)
+        return enrichAnalysisWithCreative(
+          buildDeterministicStructuredResult(structuredScenes, normalized),
+          normalized.creativeInstructions
+        )
       }
     }
   }
@@ -459,10 +487,11 @@ export async function analyzeScript(
     )
 
     const parsed = parseLlmJsonResponse(raw)
-    return validateAnalysisResult(parsed, referenceIds, {
+    const validated = validateAnalysisResult(parsed, referenceIds, {
       fullScript: trimmed,
       enforceExactScript: true
     })
+    return enrichAnalysisWithCreative(validated, normalized.creativeInstructions)
   }
 
   try {
@@ -481,6 +510,10 @@ export async function analyzeScript(
         // Keep the first valid result if the fine-split retry fails validation.
       }
     }
+    console.log('[Pipeline · analyze] Freeform analysis complete', {
+      segments: result.segments.length,
+      creativeInstructions: Boolean(normalized.creativeInstructions?.trim())
+    })
     return result
   } catch (firstErr) {
     try {
