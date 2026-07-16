@@ -115,7 +115,11 @@ export function validateAnalysisResult(
     const referenceIds = Array.isArray(seg.referenceIds)
       ? seg.referenceIds
           .map((id) => String(id).trim())
-          .filter((id) => id && (!scriptReferenceIds || scriptReferenceIds.has(id)))
+          .filter((id) => {
+            if (!id) return false
+            if (!scriptReferenceIds || scriptReferenceIds.size === 0) return true
+            return scriptReferenceIds.has(id)
+          })
       : undefined
 
     return {
