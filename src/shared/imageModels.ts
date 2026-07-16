@@ -45,7 +45,13 @@ export function pickImageModel(
   models: Pick<HiggsfieldModel, 'id'>[]
 ): string {
   const ids = new Set(models.map((m) => m.id))
-  if (current && !shouldUseDefaultImageModel(current) && ids.has(current)) {
+  // Flash / legacy nano_banana must not stick as the default — prefer Nano Banana Pro.
+  if (
+    current &&
+    !shouldUseDefaultImageModel(current) &&
+    !isLegacyDefaultImageModel(current) &&
+    ids.has(current)
+  ) {
     return current
   }
   if (ids.has(DEFAULT_IMAGE_MODEL)) return DEFAULT_IMAGE_MODEL
