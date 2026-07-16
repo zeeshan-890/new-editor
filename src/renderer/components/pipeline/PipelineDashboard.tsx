@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Loader2,
   Pause,
@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import { Button } from '../common/Button'
 import { Label } from '../common/Label'
+import { Select } from '../common/Select'
 import { LlmSettingsPanel } from './LlmSettingsPanel'
 import { AssemblyAiSettingsPanel } from './AssemblyAiSettingsPanel'
 import { ScriptBriefPanel } from './ScriptBriefPanel'
@@ -36,7 +37,15 @@ import {
   usePipelineStore
 } from '@renderer/stores/pipelineStore'
 import { useProjectTabStore } from '@renderer/stores/projectTabStore'
-import { DEFAULT_IMAGE_MODEL, DEFAULT_VIDEO_MODEL, generateId } from '@shared/types'
+import { useHiggsfieldStore } from '@renderer/stores/higgsfieldStore'
+import {
+  DEFAULT_ASPECT_RATIO,
+  DEFAULT_IMAGE_MODEL,
+  DEFAULT_VIDEO_MODEL,
+  IMAGE_ASPECT_RATIOS,
+  generateId
+} from '@shared/types'
+import { sortImageModels, pickImageModel, imageModelShortLabel } from '@shared/imageModels'
 
 export function PipelineDashboard({
   projectId,
@@ -48,6 +57,7 @@ export function PipelineDashboard({
   onCollapse?: () => void
 }): React.JSX.Element {
   const project = useProjectTabStore((s) => s.projects[projectId])
+  const updateProject = useProjectTabStore((s) => s.updateProject)
   const pipeline = normalizePipelineState(project?.pipeline ?? createEmptyPipelineState())
   const progress = pipelineProgress(pipeline)
 
@@ -72,12 +82,110 @@ export function PipelineDashboard({
   const matchSegmentTimings = usePipelineStore((s) => s.matchSegmentTimings)
   const assembleTimeline = usePipelineStore((s) => s.assembleTimeline)
 
+  const workspaces = useHiggsfieldStore((s) => s.workspaces)
+  const selectedWorkspaceId = useHiggsfieldStore((s) => s.selectedWorkspaceId)
+  const setSelectedWorkspaceId = useHiggsfieldStore((s) => s.setSelectedWorkspaceId)
+  const imageModels = useHiggsfieldStore((s) => s.imageModels)
+  const videoModels = useHiggsfieldStore((s) => s.videoModels)
+  const hfStatus = useHiggsfieldStore((s) => s.status)
+  const loadModels = useHiggsfieldStore((s) => s.loadModels)
+
   const [scriptDraft, setScriptDraft] = useState(() => pipeline.fullScript)
   const [localError, setLocalError] = useState<string | null>(null)
   const [stopping, setStopping] = useState(false)
   const [llmSettingsOpen, setLlmSettingsOpen] = useState(false)
+  const [generationDefaultsOpen, setGenerationDefaultsOpen] = useState(false)
   const scriptSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const scriptDirtyRef = useRef(false)
+
+  const sortedImageModels = useMemo(() => sortImageModels(imageModels), [imageModels])
+  const imageModelId = useMemo(
+    () =>
+      pickImageModel(
+        project?.selectedImageModel || pipeline.imageModel || DEFAULT_IMAGE_MODEL,
+        imageModels
+      ),
+    [project?.selectedImageModel, pipeline.imageModel, imageModels]
+  )
+  const videoModelId =
+    project?.selectedVideoModel || pipeline.videoModel || DEFAULT_VIDEO_MODEL
+  const aspectRatio = pipeline.styleLock.aspectRatio || DEFAULT_ASPECT_RATIO
+
+  const activeWorkspaceId = useMemo(() => {
+    if (project?.workspaceId && workspaces.some((w) => w.id === project.workspaceId)) {
+      return project.workspaceId
+    }
+    if (selectedWorkspaceId && workspaces.some((w) => w.id === selectedWorkspaceId)) {
+      return selectedWorkspaceId
+    }
+    const ledisa = workspaces.find((w) => w.name.toLowerCase().includes('ledisa'))
+    if (ledisa) return ledisa.id
+    return workspaces.find((w) => w.isSelected)?.id || workspaces[0]?.id || ''
+  }, [project?.workspaceId, selectedWorkspaceId, workspaces])
+
+  // Keep project + Higgsfield session on the same active workspace (prefer Ledisa)
+  useEffect(() => {
+    if (!project || workspaces.length === 0) return
+
+    if (project.workspaceId && workspaces.some((w) => w.id === project.workspaceId)) {
+      if (selectedWorkspaceId !== project.workspaceId) {
+        void setSelectedWorkspaceId(project.workspaceId)
+      }
+      return
+    }
+
+    const preferred =
+      workspaces.find((w) => w.name.toLowerCase().includes('ledisa')) ||
+      workspaces.find((w) => w.isSelected) ||
+      workspaces[0]
+    if (!preferred) return
+    updateProject(projectId, { workspaceId: preferred.id })
+    if (selectedWorkspaceId !== preferred.id) {
+      void setSelectedWorkspaceId(preferred.id)
+    }
+  }, [
+    project,
+    projectId,
+    workspaces,
+    selectedWorkspaceId,
+    setSelectedWorkspaceId,
+    updateProject
+  ])
+
+  const applyGenerationDefaults = (patch: {
+    workspaceId?: string
+    selectedImageModel?: string
+    selectedVideoModel?: string
+    aspectRatio?: string
+  }): void => {
+    const nextAspect = patch.aspectRatio ?? aspectRatio
+    const nextImage = patch.selectedImageModel ?? imageModelId
+    const nextVideo = patch.selectedVideoModel ?? videoModelId
+    const current = getProjectPipeline(projectId)
+    updateProject(projectId, {
+      ...(patch.workspaceId !== undefined ? { workspaceId: patch.workspaceId } : {}),
+      ...(patch.selectedImageModel !== undefined
+        ? { selectedImageModel: patch.selectedImageModel }
+        : {}),
+      ...(patch.selectedVideoModel !== undefined
+        ? { selectedVideoModel: patch.selectedVideoModel }
+        : {})
+    })
+    void updatePipeline(
+      projectId,
+      {
+        ...current,
+        imageModel: nextImage,
+        videoModel: nextVideo,
+        workspaceId: patch.workspaceId ?? current.workspaceId ?? project?.workspaceId,
+        styleLock: {
+          ...current.styleLock,
+          aspectRatio: nextAspect
+        }
+      },
+      { debounceMs: 0 }
+    )
+  }
 
   const saveCreativeInstructions = (value: string): void => {
     const current = getProjectPipeline(projectId)
@@ -107,7 +215,9 @@ export function PipelineDashboard({
   useEffect(() => {
     void loadLlmSettings()
     void loadAssemblyAiSettings()
-  }, [loadLlmSettings, loadAssemblyAiSettings])
+    void loadModels('image')
+    void loadModels('video')
+  }, [loadLlmSettings, loadAssemblyAiSettings, loadModels])
 
   useEffect(() => {
     usePipelineStore.setState({
@@ -414,11 +524,105 @@ export function PipelineDashboard({
         <button
           type="button"
           className="w-full flex items-center justify-between px-3 py-2 text-left"
+          onClick={() => setGenerationDefaultsOpen((v) => !v)}
+          aria-expanded={generationDefaultsOpen}
+        >
+          <div className="min-w-0">
+            <p className="text-xs font-medium">Generation defaults</p>
+            <p className="text-[10px] text-muted mt-0.5 truncate">
+              {[
+                workspaces.find((w) => w.id === activeWorkspaceId)?.name ||
+                  hfStatus?.selectedWorkspace?.name,
+                imageModelShortLabel(imageModelId),
+                videoModels.find((m) => m.id === videoModelId)?.name || videoModelId,
+                aspectRatio
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </p>
+          </div>
+          {generationDefaultsOpen ? (
+            <ChevronUp size={14} className="text-muted shrink-0" />
+          ) : (
+            <ChevronDown size={14} className="text-muted shrink-0" />
+          )}
+        </button>
+        {generationDefaultsOpen && (
+          <div className="px-3 pb-3 space-y-2.5">
+            <div>
+              <Label>Workspace</Label>
+              {workspaces.length === 0 ? (
+                <p className="text-xs text-muted mt-1">No workspaces — reconnect Higgsfield.</p>
+              ) : (
+                <Select
+                  value={activeWorkspaceId}
+                  onChange={(id) => {
+                    applyGenerationDefaults({ workspaceId: id })
+                    void setSelectedWorkspaceId(id)
+                  }}
+                  options={workspaces.map((ws) => ({
+                    value: ws.id,
+                    label: `${ws.name} (${Math.floor(ws.credits).toLocaleString()} credits)`
+                  }))}
+                />
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <Label>Image model</Label>
+                <Select
+                  value={imageModelId}
+                  onChange={(id) => applyGenerationDefaults({ selectedImageModel: id })}
+                  options={(sortedImageModels.length > 0
+                    ? sortedImageModels
+                    : [{ id: imageModelId, name: imageModelId }]
+                  ).map((m) => ({
+                    value: m.id,
+                    label: imageModelShortLabel(m.id)
+                  }))}
+                />
+              </div>
+              <div>
+                <Label>Video model</Label>
+                <Select
+                  value={videoModelId}
+                  onChange={(id) => applyGenerationDefaults({ selectedVideoModel: id })}
+                  options={(videoModels.length > 0
+                    ? videoModels
+                    : [{ id: videoModelId, name: videoModelId }]
+                  ).map((m) => ({
+                    value: m.id,
+                    label: m.name || m.id
+                  }))}
+                />
+              </div>
+            </div>
+
+            <div>
+              <Label>Aspect ratio</Label>
+              <Select
+                value={aspectRatio}
+                onChange={(ratio) => applyGenerationDefaults({ aspectRatio: ratio })}
+                options={IMAGE_ASPECT_RATIOS.map((ratio) => ({
+                  value: ratio,
+                  label: ratio === DEFAULT_ASPECT_RATIO ? `${ratio} (default)` : ratio
+                }))}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-md border border-border bg-card/50">
+        <button
+          type="button"
+          className="w-full flex items-center justify-between px-3 py-2 text-left"
           onClick={() => setLlmSettingsOpen((v) => !v)}
           aria-expanded={llmSettingsOpen}
         >
           <div>
-            <p className="text-xs font-medium">Model settings</p>
+            <p className="text-xs font-medium">LLM / AssemblyAI settings</p>
             <p className="text-[10px] text-muted mt-0.5">
               {llmSettings?.model ? `Current: ${llmSettings.model}` : 'Configure API key, base URL, and model'}
             </p>
