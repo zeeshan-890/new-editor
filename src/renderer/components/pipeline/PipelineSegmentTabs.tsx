@@ -2,17 +2,20 @@ import { useState } from 'react'
 import { Loader2, Play } from 'lucide-react'
 import { cn } from '@renderer/lib/utils'
 import { localMediaPathUrl } from '@renderer/lib/localFileProtocol'
+import { useHiggsfieldJobById } from '@renderer/hooks/useHiggsfieldJobById'
 import type { CharacterProfile, ScriptSegment } from '@shared/segmentPipeline'
 import { MediaLightbox } from '../common/MediaLightbox'
 import { PipelinePromptTab } from './PipelinePromptTab'
 import {
-  STATUS_LABELS,
   characterNames,
   formatAudioMatchMeta,
-  isRunningStatus,
+  segmentImagePhase,
+  segmentStatusDisplay,
+  segmentVideoPhase,
   sortSegments,
   statusClass
 } from './pipelineSegmentUi'
+import type { HiggsfieldJobStatusLookup, SegmentGenerationPhase } from './pipelineSegmentUi'
 import type { SegmentPipelineState } from '@shared/segmentPipeline'
 
 export type PipelineSegmentTab = 'preview' | 'images' | 'script' | 'prompt' | 'videos' | 'audio'
@@ -62,67 +65,103 @@ export function PipelineSegmentTabBar({
   )
 }
 
-function SegmentStatusBadge({ segment }: { segment: ScriptSegment }): React.JSX.Element {
+function SegmentStatusBadge({
+  segment,
+  jobById
+}: {
+  segment: ScriptSegment
+  jobById: HiggsfieldJobStatusLookup
+}): React.JSX.Element {
+  const display = segmentStatusDisplay(segment, jobById)
   return (
     <span className={`inline-flex items-center gap-1 ${statusClass(segment.status)}`}>
-      {isRunningStatus(segment.status) && (
+      {display.phase === 'generating' && (
         <Loader2 size={10} className="animate-spin shrink-0" />
       )}
-      {STATUS_LABELS[segment.status] ?? segment.status}
+      {display.label}
     </span>
   )
 }
 
+function SegmentRetryButton({
+  label,
+  phase,
+  onClick
+}: {
+  label: string
+  phase: SegmentGenerationPhase
+  onClick: () => void
+}): React.JSX.Element {
+  const busy = phase !== 'idle'
+  const actionLabel =
+    phase === 'generating' ? 'Generating…' : phase === 'waiting' ? 'Waiting' : label
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      className="inline-flex items-center gap-1 text-[10px] text-primary hover:underline disabled:opacity-70"
+      onClick={onClick}
+    >
+      {phase === 'generating' ? <Loader2 size={10} className="animate-spin" /> : null}
+      {actionLabel}
+    </button>
+  )
+}
+
 function RetryActions({
-  segmentId,
+  segment,
+  jobById,
   onRetry,
   onOpenInSidebar
 }: {
-  segmentId: string
+  segment: ScriptSegment
+  jobById: HiggsfieldJobStatusLookup
   onRetry: (segmentId: string, stage: 'image' | 'video' | 'full') => void
   onOpenInSidebar?: (segmentId: string, media: 'image' | 'video') => void
 }): React.JSX.Element {
+  const imagePhase = segmentImagePhase(segment, jobById)
+  const videoPhase = segmentVideoPhase(segment, jobById)
   return (
     <div className="flex flex-wrap gap-2">
       {onOpenInSidebar && (
         <button
           type="button"
           className="text-[10px] text-primary hover:underline"
-          onClick={() => onOpenInSidebar(segmentId, 'image')}
+          onClick={() => onOpenInSidebar(segment.id, 'image')}
         >
           Open in sidebar
         </button>
       )}
-      <button
-        type="button"
-        className="text-[10px] text-primary hover:underline"
-        onClick={() => onRetry(segmentId, 'image')}
-      >
-        Retry image
-      </button>
-      <button
-        type="button"
-        className="text-[10px] text-primary hover:underline"
-        onClick={() => onRetry(segmentId, 'video')}
-      >
-        Retry video
-      </button>
+      <SegmentRetryButton
+        label="Retry image"
+        phase={imagePhase}
+        onClick={() => onRetry(segment.id, 'image')}
+      />
+      <SegmentRetryButton
+        label="Retry video"
+        phase={videoPhase}
+        onClick={() => onRetry(segment.id, 'video')}
+      />
     </div>
   )
 }
 
 function VideoSegmentActions({
   segment,
+  jobById,
   onRetry,
   onDownload,
   onOpenInSidebar
 }: {
   segment: ScriptSegment
+  jobById: HiggsfieldJobStatusLookup
   onRetry: (segmentId: string, stage: 'image' | 'video' | 'full') => void
   onDownload?: (segment: ScriptSegment) => void
   onOpenInSidebar?: (segmentId: string, media: 'image' | 'video') => void
 }): React.JSX.Element {
   const canDownload = Boolean(segment.videoLocalPath && onDownload)
+  const imagePhase = segmentImagePhase(segment, jobById)
+  const videoPhase = segmentVideoPhase(segment, jobById)
   return (
     <div className="flex flex-wrap gap-2">
       {onOpenInSidebar && (
@@ -134,20 +173,16 @@ function VideoSegmentActions({
           Open in sidebar
         </button>
       )}
-      <button
-        type="button"
-        className="text-[10px] text-primary hover:underline"
+      <SegmentRetryButton
+        label="Retry image"
+        phase={imagePhase}
         onClick={() => onRetry(segment.id, 'image')}
-      >
-        Retry image
-      </button>
-      <button
-        type="button"
-        className="text-[10px] text-primary hover:underline"
+      />
+      <SegmentRetryButton
+        label="Retry video"
+        phase={videoPhase}
         onClick={() => onRetry(segment.id, 'video')}
-      >
-        Retry video
-      </button>
+      />
       {canDownload && (
         <button
           type="button"
@@ -280,6 +315,7 @@ function SegmentVideoPlayer({
 function ImagesTab({
   segments,
   characters,
+  jobById,
   onEditSegment,
   onRetry,
   onOpenInSidebar,
@@ -287,6 +323,7 @@ function ImagesTab({
 }: {
   segments: ScriptSegment[]
   characters: CharacterProfile[]
+  jobById: HiggsfieldJobStatusLookup
   onEditSegment: (segmentId: string, patch: Partial<ScriptSegment>) => void
   onRetry: (segmentId: string, stage: 'image' | 'video' | 'full') => void
   onOpenInSidebar?: (segmentId: string, media: 'image' | 'video') => void
@@ -333,7 +370,7 @@ function ImagesTab({
           >
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] font-medium text-muted">Segment {segment.index + 1}</span>
-              <SegmentStatusBadge segment={segment} />
+              <SegmentStatusBadge segment={segment} jobById={jobById} />
             </div>
 
             {pending && pendingSrc ? (
@@ -408,13 +445,11 @@ function ImagesTab({
                         Open in sidebar
                       </button>
                     )}
-                    <button
-                      type="button"
-                      className="text-[10px] text-primary hover:underline"
+                    <SegmentRetryButton
+                      label="Retry image"
+                      phase={segmentImagePhase(segment, jobById)}
                       onClick={() => onRetry(segment.id, 'image')}
-                    >
-                      Retry image
-                    </button>
+                    />
                   </div>
                 </div>
               </div>
@@ -477,7 +512,8 @@ function ImagesTab({
             />
             {!pending && (
               <RetryActions
-                segmentId={segment.id}
+                segment={segment}
+                jobById={jobById}
                 onRetry={onRetry}
                 onOpenInSidebar={onOpenInSidebar}
               />
@@ -569,12 +605,14 @@ function ScriptTab({
 
 function VideosTab({
   segments,
+  jobById,
   onEditSegment,
   onRetry,
   onDownloadVideo,
   onOpenInSidebar
 }: {
   segments: ScriptSegment[]
+  jobById: HiggsfieldJobStatusLookup
   onEditSegment: (segmentId: string, patch: Partial<ScriptSegment>) => void
   onRetry: (segmentId: string, stage: 'image' | 'video' | 'full') => void
   onDownloadVideo?: (segment: ScriptSegment) => void
@@ -592,7 +630,7 @@ function VideosTab({
         <div key={segment.id} className="rounded-md border border-border p-2 space-y-2">
           <div className="flex items-center justify-between gap-2">
             <span className="text-[10px] font-medium text-muted">Segment {segment.index + 1}</span>
-            <SegmentStatusBadge segment={segment} />
+            <SegmentStatusBadge segment={segment} jobById={jobById} />
           </div>
           <div className="flex gap-2">
             <SegmentMediaThumb
@@ -634,6 +672,7 @@ function VideosTab({
           />
           <VideoSegmentActions
             segment={segment}
+            jobById={jobById}
             onRetry={onRetry}
             onDownload={onDownloadVideo}
             onOpenInSidebar={onOpenInSidebar}
@@ -723,6 +762,7 @@ export function PipelineSegmentTabContent({
   onOpenInSidebar,
   onApproveSegment,
   onAttachSegmentImages,
+  onAttachExistingMedia,
   onRemoveSegmentReference
 }: {
   active: PipelineSegmentTab
@@ -737,8 +777,14 @@ export function PipelineSegmentTabContent({
   onOpenInSidebar?: (segmentId: string, media: 'image' | 'video') => void
   onApproveSegment?: (segmentId: string) => void
   onAttachSegmentImages: (segmentId: string, files: File[]) => void | Promise<void>
+  onAttachExistingMedia: (
+    segmentId: string,
+    media: { localPath: string; name: string; existingRefId?: string }
+  ) => void | Promise<void>
   onRemoveSegmentReference: (segmentId: string, referenceId: string) => void
 }): React.JSX.Element {
+  const jobById = useHiggsfieldJobById()
+
   if (active === 'preview') return <></>
   if (segments.length === 0) return <PipelineSegmentEmptyState />
 
@@ -747,6 +793,7 @@ export function PipelineSegmentTabContent({
       <ImagesTab
         segments={segments}
         characters={characters}
+        jobById={jobById}
         onEditSegment={onEditSegment}
         onRetry={onRetry}
         onOpenInSidebar={onOpenInSidebar}
@@ -769,6 +816,7 @@ export function PipelineSegmentTabContent({
         onOpenInSidebar={onOpenInSidebar}
         onApproveSegment={onApproveSegment}
         onAttachSegmentImages={onAttachSegmentImages}
+        onAttachExistingMedia={onAttachExistingMedia}
         onRemoveSegmentReference={onRemoveSegmentReference}
       />
     )
@@ -777,6 +825,7 @@ export function PipelineSegmentTabContent({
     return (
       <VideosTab
         segments={segments}
+        jobById={jobById}
         onEditSegment={onEditSegment}
         onRetry={onRetry}
         onDownloadVideo={onDownloadVideo}
