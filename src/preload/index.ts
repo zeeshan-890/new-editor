@@ -144,6 +144,10 @@ export interface ElectronAPI {
     script: string,
     pipeline?: SegmentPipelineState
   ) => Promise<GenerationProject>
+  applyPipelineParts: (
+    projectId: string,
+    pipeline?: SegmentPipelineState
+  ) => Promise<GenerationProject>
   updateProjectPipeline: (projectId: string, pipeline: SegmentPipelineState) => Promise<GenerationProject>
   syncPipelineTimelineAudio: (
     projectId: string,
@@ -296,6 +300,8 @@ const api: ElectronAPI = {
   analyzeScript: (script) => ipcRenderer.invoke(IPC.LLM_ANALYZE_SCRIPT, script),
   applyPipelineAnalysis: (projectId, script, pipeline) =>
     ipcRenderer.invoke(IPC.PROJECT_APPLY_PIPELINE_ANALYSIS, { projectId, script, pipeline }),
+  applyPipelineParts: (projectId, pipeline) =>
+    ipcRenderer.invoke(IPC.PROJECT_APPLY_PIPELINE_PARTS, { projectId, pipeline }),
   updateProjectPipeline: (projectId, pipeline) =>
     ipcRenderer.invoke(IPC.PROJECT_UPDATE_PIPELINE, { projectId, pipeline }),
   syncPipelineTimelineAudio: (projectId, videoEditor, pipeline) =>
