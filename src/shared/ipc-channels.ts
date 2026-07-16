@@ -75,6 +75,7 @@ export const IPC = {
   PIPELINE_LOG: 'pipeline:log',
   BATCH_ALIGN_SCRIPT_AUDIO: 'alignment:batch-script-audio',
   PROJECT_APPLY_PIPELINE_ANALYSIS: 'project:apply-pipeline-analysis',
+  PROJECT_APPLY_PIPELINE_PARTS: 'project:apply-pipeline-parts',
   PROJECT_UPDATE_PIPELINE: 'project:update-pipeline',
   PROJECT_SYNC_PIPELINE_TIMELINE_AUDIO: 'project:sync-pipeline-timeline-audio',
   PROJECT_MATCH_PIPELINE_SEGMENT_TIMINGS: 'project:match-pipeline-segment-timings'
