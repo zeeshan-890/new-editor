@@ -4,6 +4,9 @@ import type {
   LlmAnalyzeSegmentInput
 } from '../../shared/segmentPipeline'
 import type { ParsedScene, ParsedSegmentBlock } from './parseStructuredScript'
+import { classifySceneVisualMode } from '../../shared/pipelinePromptGuards'
+import { enrichAnalysisWithCreative } from './enrichAnalysisWithCreative'
+import { creativeStyleLockHint } from '../../shared/creativeInstructions'
 
 /** Keep only reference ids that exist on the project brief. Prefer the model's choices. */
 export function pickReferenceIdsForScene(
@@ -40,10 +43,37 @@ function clipFallbackPrompt(scene: ParsedScene): string {
     scene.clips.length > 0
       ? scene.clips.map((c) => c.description).join('. ')
       : scene.voText
+  if (classifySceneVisualMode(clipText, scene.voText) === 'diagram') {
+    return [
+      `Unlabeled medical/scientific diagram: ${clipText}.`,
+      'Isolated anatomical or scientific subject only — the ONLY visual in frame, centered, textbook-quality illustration or 3D medical render.',
+      'Empty plain solid neutral background. No other visuals: no text, labels, captions, arrows with words, people, hands, rooms, props, icons, insets, or packaging.'
+    ].join(' ')
+  }
   return `${clipText}. Single unified cinematic frame suitable for image-to-video. Not a collage or multi-panel.`
 }
 
+/** Ensure diagram imagePrompts explicitly ban text/labels/background clutter. */
+function ensureMedicalDiagramPrompt(prompt: string): string {
+  const trimmed = prompt.trim()
+  if (!trimmed) return trimmed
+  const lower = trimmed.toLowerCase()
+  const needsClean =
+    !lower.includes('no text') &&
+    !lower.includes('unlabeled') &&
+    !lower.includes('no label')
+  if (!needsClean) return trimmed
+  return `${trimmed} Unlabeled only: empty plain solid neutral background; nothing else in frame except the single diagram — no text, labels, captions, people, hands, rooms, props, icons, insets, or packaging.`
+}
+
 function clipFallbackMotion(scene: ParsedScene): string {
+  const clipText =
+    scene.clips.length > 0
+      ? scene.clips.map((c) => c.description).join('. ')
+      : scene.voText
+  if (classifySceneVisualMode(clipText, scene.voText) === 'diagram') {
+    return `Slow cinematic orbit and gentle push-in around the medical diagram (${clipText.slice(0, 160)}). Soft lighting drift; keep unlabeled on a plain background — no text appearing.`
+  }
   if (scene.clips.length > 1) {
     return `Clear continuous motion through the shot: ${scene.clips.map((c) => c.description).join('; ')}. Slow cinematic push-in; subjects move naturally — not a still.`
   }
@@ -55,7 +85,7 @@ function clipFallbackMotion(scene: ParsedScene): string {
 
 /**
  * Lock VO text, keep LLM-written prompts (sanitized), keep LLM reference assignments.
- * Creative instructions are NOT re-appended here — the model already wove them in.
+ * Then bake creative instructions so freeform-style briefs still land in prompts.
  */
 export function finalizeStructuredSegments(
   result: LlmAnalyzeResult,
@@ -74,8 +104,11 @@ export function finalizeStructuredSegments(
     .map((segment, index) => {
       const scene = scenes[index]
       const referenceIds = pickReferenceIdsForScene(scene, input.references, segment.referenceIds)
-      const imagePrompt =
+      let imagePrompt =
         sanitizeGeneratedPrompt(segment.imagePrompt) || clipFallbackPrompt(scene)
+      if (classifySceneVisualMode(imagePrompt, scene.voText) === 'diagram') {
+        imagePrompt = ensureMedicalDiagramPrompt(imagePrompt)
+      }
       let videoMotionPrompt = sanitizeGeneratedPrompt(segment.videoMotionPrompt ?? '')
       if (!videoMotionPrompt) videoMotionPrompt = clipFallbackMotion(scene)
       if (videoMotionPrompt.length > 360) {
@@ -92,14 +125,13 @@ export function finalizeStructuredSegments(
       }
     })
 
-  return { ...result, segments }
+  return enrichAnalysisWithCreative({ ...result, segments }, input.creativeInstructions)
 }
-
-/** Last-resort segments from Scene/VO/Clip only (no hardcoded creative-rule engine). */
 export function buildDeterministicStructuredResult(
   scenes: ParsedScene[],
   input: AnalyzeScriptInput
 ): LlmAnalyzeResult {
+  const styleHint = creativeStyleLockHint(input.creativeInstructions)
   const draft: LlmAnalyzeResult = {
     segments: scenes.map((scene, index) => ({
       index,
@@ -121,7 +153,7 @@ export function buildDeterministicStructuredResult(
     ],
     styleLock: {
       aspectRatio: '9:16',
-      visualStyle: 'cinematic realism, natural soft lighting',
+      visualStyle: styleHint || 'cinematic realism, natural soft lighting',
       setting: 'domestic bathroom and lifestyle interiors'
     }
   }
@@ -131,6 +163,11 @@ export function buildDeterministicStructuredResult(
 
 function segmentFallbackMotion(block: ParsedSegmentBlock): string {
   const prompt = block.imagePrompt.trim()
+  if (classifySceneVisualMode(prompt, block.scriptText) === 'diagram') {
+    return prompt
+      ? `Slow cinematic orbit and gentle push-in around the medical diagram (${prompt.slice(0, 160)}). Soft lighting drift; keep unlabeled on a plain background — no text appearing.`
+      : 'Slow cinematic orbit and gentle push-in around the medical diagram on a plain background. Soft lighting drift; keep it unlabeled — no text appearing.'
+  }
   if (prompt) {
     return `Animate with visible action matching: ${prompt.slice(0, 220)}. Camera slowly pushes in; natural body language and secondary motion (hands, fabric, face).`
   }
@@ -158,8 +195,11 @@ export function finalizeStructuredSegmentBlocks(
     .map((segment, index) => {
       const block = blocks[index]
       const referenceIds = pickReferenceIdsForScene(block, input.references, segment.referenceIds)
-      const imagePrompt =
+      let imagePrompt =
         sanitizeGeneratedPrompt(block.imagePrompt) || block.imagePrompt
+      if (classifySceneVisualMode(imagePrompt, block.scriptText) === 'diagram') {
+        imagePrompt = ensureMedicalDiagramPrompt(imagePrompt)
+      }
       let videoMotionPrompt = sanitizeGeneratedPrompt(segment.videoMotionPrompt ?? '')
       if (!videoMotionPrompt) videoMotionPrompt = segmentFallbackMotion(block)
       if (videoMotionPrompt.length > 360) {
@@ -176,7 +216,7 @@ export function finalizeStructuredSegmentBlocks(
       }
     })
 
-  return { ...result, segments }
+  return enrichAnalysisWithCreative({ ...result, segments }, input.creativeInstructions)
 }
 
 /** Last-resort segments from Segment/Script/V0 Prompt only. */
@@ -184,6 +224,7 @@ export function buildDeterministicSegmentBlockResult(
   blocks: ParsedSegmentBlock[],
   input: AnalyzeScriptInput
 ): LlmAnalyzeResult {
+  const styleHint = creativeStyleLockHint(input.creativeInstructions)
   const draft: LlmAnalyzeResult = {
     segments: blocks.map((block, index) => ({
       index,
@@ -205,7 +246,7 @@ export function buildDeterministicSegmentBlockResult(
     ],
     styleLock: {
       aspectRatio: '9:16',
-      visualStyle: 'cinematic realism, natural soft lighting',
+      visualStyle: styleHint || 'cinematic realism, natural soft lighting',
       setting: 'inferred from segment prompts'
     }
   }
