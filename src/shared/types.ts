@@ -418,11 +418,19 @@ export interface AppSession {
 }
 
 /** Increment when tab draft migrations are required on load. */
-export const APP_SESSION_VERSION = 4
+export const APP_SESSION_VERSION = 5
 
 export const DEFAULT_IMAGE_MODEL = 'nano_banana_2'
 export const DEFAULT_VIDEO_MODEL = 'kling3_0'
 export const DEFAULT_ASPECT_RATIO = '9:16'
+
+/** Older Flash / bare nano_banana defaults → Nano Banana Pro. */
+export function resolveImageModelId(model: string | undefined | null): string {
+  if (!model || model === 'nano_banana_flash' || model === 'nano_banana') {
+    return DEFAULT_IMAGE_MODEL
+  }
+  return model
+}
 
 export const IMAGE_ASPECT_RATIOS = [
   '9:16',
@@ -620,6 +628,7 @@ export function normalizeTabComposerState(state: TabComposerState | undefined): 
     image: {
       ...empty.image,
       ...state.image,
+      model: resolveImageModelId(state.image?.model ?? empty.image.model),
       imageAttachments: state.image?.imageAttachments ?? [],
       aspectRatio: state.image?.aspectRatio ?? DEFAULT_ASPECT_RATIO
     }
@@ -663,6 +672,9 @@ export function normalizeGenerationProject(project: GenerationProject): Generati
     imageAttachments: Array.isArray(project.imageAttachments) ? project.imageAttachments : [],
     videoStartFrame: project.videoStartFrame ?? null,
     videoDuration: clampVideoDurationSeconds(project.videoDuration ?? empty.videoDuration),
+    selectedImageModel: resolveImageModelId(
+      project.selectedImageModel ?? empty.selectedImageModel
+    ),
     composer: normalizeTabComposerState(project.composer),
     videoEditor: project.videoEditor
       ? normalizeVideoEditorProject(project.videoEditor, project.name)
