@@ -33,27 +33,22 @@ import { useHiggsfieldStore } from '@renderer/stores/higgsfieldStore'
 import { isHiggsfieldAuthFailureMessage } from '@shared/higgsfieldAuth'
 import type {
   ProjectGeneration,
-  ProjectMedia,
-  ScriptAudioMatch
+  ProjectMedia
 } from '@shared/types'
 import {
-  AUTO_EXTRA_DURATION_MIN_AUDIO_SECONDS,
   activeModeDraft,
   clampAutoExtraDurationSeconds,
   createEmptyTabComposerState,
   DEFAULT_IMAGE_MODEL,
   DEFAULT_VIDEO_MODEL,
   DEFAULT_ASPECT_RATIO,
-  IMAGE_ASPECT_RATIOS,
   MANUAL_VIDEO_DURATION_SECONDS,
-  VIDEO_ASPECT_RATIOS,
   generateId,
   shortProjectId
 } from '@shared/types'
-import { sortImageModels, pickImageModel, imageModelShortLabel } from '@shared/imageModels'
+import { pickImageModel, imageModelShortLabel } from '@shared/imageModels'
 import {
   attachmentDisplayName,
-  autoVideoDurationFromMatch,
   buildImageGenerationRequest,
   resolveVideoDurationSeconds,
   validateImageGenerationInput
@@ -153,7 +148,6 @@ export function GenerationWorkspace({
   const pendingJobProjects = useProjectTabStore((s) => s.pendingJobProjects)
   const pendingJobConfigs = useProjectTabStore((s) => s.pendingJobConfigs)
   const openProjectEditorTab = useProjectTabStore((s) => s.openProjectEditorTab)
-  const setScriptMatch = useProjectTabStore((s) => s.setScriptMatch)
 
   const jobs = useHiggsfieldStore((s) => s.jobs)
   const queueStats = useHiggsfieldStore((s) => s.queueStats)
@@ -163,14 +157,12 @@ export function GenerationWorkspace({
   const login = useHiggsfieldStore((s) => s.login)
   const workspaces = useHiggsfieldStore((s) => s.workspaces)
   const selectedWorkspaceId = useHiggsfieldStore((s) => s.selectedWorkspaceId)
-  const setSelectedWorkspaceId = useHiggsfieldStore((s) => s.setSelectedWorkspaceId)
   const imageModels = useHiggsfieldStore((s) => s.imageModels)
   const hfError = useHiggsfieldStore((s) => s.error)
 
   const [error, setError] = useState<string | null>(null)
   const [lightboxItem, setLightboxItem] = useState<ProjectGeneration | null>(null)
   const [dragOverTarget, setDragOverTarget] = useState<'attachments' | 'startFrame' | null>(null)
-  const [matchingScript, setMatchingScript] = useState(false)
   const [pipelineOpen, setPipelineOpen] = useState(true)
   const [mainTab, setMainTab] = useState<PipelineSegmentTab>('preview')
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -184,14 +176,37 @@ export function GenerationWorkspace({
     void syncJobs()
   }, [refreshHiggsfield, syncJobs])
 
+  // Keep freeform composer aligned with Pipeline sidebar defaults
   useEffect(() => {
     if (mode !== 'image') return
-    if (imageModels.length === 0) return
-    const ids = new Set(imageModels.map((m) => m.id))
-    const currentModel = useProjectTabStore.getState().tabDrafts[tabId]?.image.model
-    if (currentModel && ids.has(currentModel)) return
-    updateModeDraft(tabId, 'image', { model: pickImageModel(undefined, imageModels) })
-  }, [imageModels, mode, tabId, updateModeDraft])
+    const model = pickImageModel(
+      project?.selectedImageModel || project?.pipeline?.imageModel,
+      imageModels
+    )
+    const current = useProjectTabStore.getState().tabDrafts[tabId]?.image
+    const aspect =
+      project?.pipeline?.styleLock?.aspectRatio ||
+      current?.aspectRatio ||
+      DEFAULT_ASPECT_RATIO
+    if (current?.model === model && current?.aspectRatio === aspect) return
+    updateModeDraft(tabId, 'image', { model, aspectRatio: aspect })
+  }, [
+    mode,
+    tabId,
+    project?.selectedImageModel,
+    project?.pipeline?.imageModel,
+    project?.pipeline?.styleLock?.aspectRatio,
+    imageModels,
+    updateModeDraft
+  ])
+
+  useEffect(() => {
+    if (mode !== 'video') return
+    const model = project?.selectedVideoModel || project?.pipeline?.videoModel || DEFAULT_VIDEO_MODEL
+    const current = useProjectTabStore.getState().tabDrafts[tabId]?.video
+    if (current?.model === model) return
+    updateModeDraft(tabId, 'video', { model })
+  }, [mode, tabId, project?.selectedVideoModel, project?.pipeline?.videoModel, updateModeDraft])
 
   useEffect(() => {
     const onDragOver = (event: DragEvent): void => {
@@ -215,7 +230,12 @@ export function GenerationWorkspace({
   )
 
   const activeWorkspaceId =
-    selectedWorkspaceId || workspaces.find((ws) => ws.isSelected)?.id || workspaces[0]?.id || ''
+    project?.workspaceId ||
+    selectedWorkspaceId ||
+    workspaces.find((ws) => ws.name.toLowerCase().includes('ledisa'))?.id ||
+    workspaces.find((ws) => ws.isSelected)?.id ||
+    workspaces[0]?.id ||
+    ''
 
   const attachImportedMedia = (
     imported: { localPath: string; name: string },
@@ -651,42 +671,6 @@ export function GenerationWorkspace({
     }
   }
 
-  const handleMatchScriptAudio = async (): Promise<void> => {
-    if (!window.electronAPI?.alignScriptAudio) return
-    if (mode !== 'video') return
-    if (!draft.audioReference?.localPath) {
-      setError('Link an audio clip from the editor first.')
-      return
-    }
-    if (!draft.script.trim()) {
-      setError('Enter script text before matching.')
-      return
-    }
-    setMatchingScript(true)
-    setError(null)
-    try {
-      const match: ScriptAudioMatch = await window.electronAPI.alignScriptAudio({
-        audioPath: draft.audioReference.localPath,
-        script: draft.script,
-        trimStartMs: draft.linkedClipSourceInMs ?? undefined,
-        trimEndMs: draft.linkedClipSourceOutMs ?? undefined
-      })
-      patchDraft({
-        scriptMatch: match,
-        durationSource: 'script-audio-match',
-        videoDuration: autoVideoDurationFromMatch(
-          match.durationMs,
-          draft.autoExtraDurationSeconds
-        )
-      })
-      setScriptMatch(projectId, match)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setMatchingScript(false)
-    }
-  }
-
   const patchDraft = (patch: Partial<typeof draft>): void => {
     updateModeDraft(tabId, mode, patch)
   }
@@ -873,20 +857,6 @@ export function GenerationWorkspace({
             </div>
           )}
 
-          {status?.authenticated && workspaces.length > 0 && (
-            <select
-              value={activeWorkspaceId}
-              onChange={(e) => void setSelectedWorkspaceId(e.target.value)}
-              className="w-full h-8 rounded-md border border-border bg-card px-2 text-xs"
-            >
-              {workspaces.map((ws) => (
-                <option key={ws.id} value={ws.id}>
-                  {ws.name} ({Math.floor(ws.credits).toLocaleString()} cr)
-                </option>
-              ))}
-            </select>
-          )}
-
           <div className="flex rounded-md border border-border overflow-hidden">
             {(['image', 'video'] as const).map((m) => (
               <button
@@ -904,50 +874,6 @@ export function GenerationWorkspace({
                 {m === 'image' ? 'Image' : 'Video'}
               </button>
             ))}
-          </div>
-
-          {mode === 'image' ? (
-            <div className="space-y-1">
-              <Label>Image model</Label>
-              <select
-                value={
-                  imageModels.some((m) => m.id === draft.model)
-                    ? draft.model
-                    : DEFAULT_IMAGE_MODEL
-                }
-                onChange={(e) => patchDraft({ model: e.target.value })}
-                className="w-full h-8 rounded-md border border-border bg-card px-2 text-xs"
-              >
-                {(imageModels.length > 0
-                  ? sortImageModels(imageModels)
-                  : [{ id: DEFAULT_IMAGE_MODEL, name: 'Nano Banana Pro — Text to Image' }]
-                ).map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          ) : (
-            <p className="text-[10px] text-muted">
-              Model: Kling v3.0 ({DEFAULT_VIDEO_MODEL})
-            </p>
-          )}
-
-          <div className="space-y-1">
-            <Label>Aspect ratio</Label>
-            <select
-              value={draft.aspectRatio ?? DEFAULT_ASPECT_RATIO}
-              onChange={(e) => patchDraft({ aspectRatio: e.target.value })}
-              className="w-full h-8 rounded-md border border-border bg-card px-2 text-xs"
-            >
-              {(mode === 'video' ? VIDEO_ASPECT_RATIOS : IMAGE_ASPECT_RATIOS).map((ratio) => (
-                <option key={ratio} value={ratio}>
-                  {ratio}
-                  {ratio === DEFAULT_ASPECT_RATIO ? ' (default)' : ''}
-                </option>
-              ))}
-            </select>
           </div>
         </div>
 
@@ -1105,128 +1031,109 @@ export function GenerationWorkspace({
 
           {mode === 'video' && (
             <>
-              <div>
-                <Label>Starting frame</Label>
-                <div
-                  className={cn(
-                    'mt-1 rounded-md border border-dashed p-2 transition-colors',
-                    dragOverTarget === 'startFrame'
-                      ? 'border-primary bg-primary/5'
-                      : 'border-border'
-                  )}
-                  tabIndex={0}
-                  onDragEnterCapture={() => setDragOverTarget('startFrame')}
-                  onDragLeaveCapture={(e) => {
-                    if (e.currentTarget.contains(e.relatedTarget as Node)) return
-                    setDragOverTarget(null)
-                  }}
-                  onDragOverCapture={allowFileDrop}
-                  onDropCapture={(e) => void onDropFiles(e, 'startFrame')}
-                  onPaste={(e) => void onPasteImages(e, 'startFrame')}
-                >
-                  {draft.videoStartFrame ? (
-                    <div className="relative h-24 w-full rounded overflow-hidden group">
-                      <img
-                        src={localMediaPathUrl(draft.videoStartFrame.previewUrl ?? draft.videoStartFrame.localPath)}
-                        alt="Start frame"
-                        className="h-full w-full object-contain bg-black/20"
-                      />
+              <div className="flex items-end gap-2">
+                <div className="shrink-0">
+                  <Label>Start frame</Label>
+                  <div
+                    className={cn(
+                      'mt-1 h-16 w-16 rounded-md border border-dashed overflow-hidden transition-colors',
+                      dragOverTarget === 'startFrame'
+                        ? 'border-primary bg-primary/5'
+                        : 'border-border'
+                    )}
+                    tabIndex={0}
+                    onDragEnterCapture={() => setDragOverTarget('startFrame')}
+                    onDragLeaveCapture={(e) => {
+                      if (e.currentTarget.contains(e.relatedTarget as Node)) return
+                      setDragOverTarget(null)
+                    }}
+                    onDragOverCapture={allowFileDrop}
+                    onDropCapture={(e) => void onDropFiles(e, 'startFrame')}
+                    onPaste={(e) => void onPasteImages(e, 'startFrame')}
+                  >
+                    {draft.videoStartFrame ? (
+                      <div className="relative h-full w-full group">
+                        <img
+                          src={localMediaPathUrl(
+                            draft.videoStartFrame.previewUrl ?? draft.videoStartFrame.localPath
+                          )}
+                          alt="Start frame"
+                          className="h-full w-full object-cover bg-black/20"
+                        />
+                        <button
+                          type="button"
+                          className="absolute top-0.5 right-0.5 rounded-full bg-black/70 p-0.5 opacity-0 group-hover:opacity-100"
+                          onClick={() => patchDraft({ videoStartFrame: null })}
+                        >
+                          <X size={10} className="text-white" />
+                        </button>
+                      </div>
+                    ) : (
                       <button
                         type="button"
-                        className="absolute top-1 right-1 rounded-full bg-black/70 p-1"
-                        onClick={() => patchDraft({ videoStartFrame: null })}
-                      >
-                        <X size={12} className="text-white" />
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col items-center py-4 text-xs text-muted gap-2">
-                      <ImagePlus size={20} />
-                      <button
-                        type="button"
-                        className="text-primary hover:underline"
+                        title="Upload or drag starting frame"
+                        className="h-full w-full flex flex-col items-center justify-center gap-0.5 text-muted hover:text-primary hover:bg-card"
                         onClick={() => startFrameInputRef.current?.click()}
                       >
-                        Upload or drag image
+                        <ImagePlus size={16} />
+                        <span className="text-[9px] leading-none">Add</span>
                       </button>
-                      <button
-                        type="button"
-                        className="text-primary hover:underline"
-                        onClick={async () => {
-                          const path = await window.electronAPI?.openImageFile()
-                          if (path) await importImage(path, 'startFrame')
-                        }}
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex-1 min-w-0">
+                  <Label>Duration</Label>
+                  <div className="mt-1 flex gap-1.5">
+                    <select
+                      value={draft.durationSource}
+                      onChange={(e) =>
+                        patchDraft({
+                          durationSource: e.target.value as 'manual' | 'script-audio-match'
+                        })
+                      }
+                      className="h-9 min-w-0 flex-1 rounded-md border border-border bg-card px-1.5 text-xs"
+                    >
+                      <option value="manual">Manual</option>
+                      <option value="script-audio-match" disabled={!draft.scriptMatch}>
+                        Auto
+                      </option>
+                    </select>
+                    {draft.durationSource === 'manual' ? (
+                      <select
+                        value={draft.videoDuration}
+                        onChange={(e) => patchDraft({ videoDuration: Number(e.target.value) })}
+                        className="h-9 w-[4.5rem] shrink-0 rounded-md border border-border bg-card px-1.5 text-sm"
                       >
-                        Choose from computer
-                      </button>
-                    </div>
-                  )}
+                        {MANUAL_VIDEO_DURATION_SECONDS.map((d) => (
+                          <option key={d} value={d}>
+                            {d}s
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="h-9 min-w-0 flex-1 flex items-center rounded-md border border-border bg-card px-2 text-xs truncate">
+                        {draft.scriptMatch
+                          ? `${resolveVideoDurationSeconds(draft)}s`
+                          : 'Match script first'}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              <div>
-                <Label>Video duration</Label>
-                <div className="mt-1 mb-2 flex flex-col gap-1.5 text-xs">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name={`duration-source-${tabId}`}
-                      checked={draft.durationSource === 'manual'}
-                      onChange={() => patchDraft({ durationSource: 'manual' })}
-                    />
-                    <span>Manual — pick 3s to 15s</span>
-                  </label>
-                  <label
-                    className={`flex items-center gap-2 ${draft.scriptMatch ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}
-                  >
-                    <input
-                      type="radio"
-                      name={`duration-source-${tabId}`}
-                      checked={draft.durationSource === 'script-audio-match'}
-                      onChange={() => patchDraft({ durationSource: 'script-audio-match' })}
-                      disabled={!draft.scriptMatch}
-                    />
-                    <span>Auto — from script + audio match</span>
-                  </label>
-                </div>
-                {draft.durationSource === 'manual' ? (
-                  <select
-                    value={draft.videoDuration}
-                    onChange={(e) => patchDraft({ videoDuration: Number(e.target.value) })}
-                    className="w-full h-9 rounded-md border border-border bg-card px-2 text-sm"
-                  >
-                    {MANUAL_VIDEO_DURATION_SECONDS.map((d) => (
-                      <option key={d} value={d}>
-                        {d}s
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <div className="rounded-md border border-border bg-card px-3 py-2 text-sm">
-                    {draft.scriptMatch ? (
-                      <div className="space-y-1">
-                        <div>
-                          <span>{resolveVideoDurationSeconds(draft)}s</span>
-                          <span className="text-muted text-xs ml-2">
-                            (matched {(draft.scriptMatch.durationMs / 1000).toFixed(2)}s)
-                          </span>
-                        </div>
-                        <p className="text-muted text-xs">
-                          Extra {clampAutoExtraDurationSeconds(draft.autoExtraDurationSeconds)}s is
-                          {draft.scriptMatch.durationMs / 1000 >= AUTO_EXTRA_DURATION_MIN_AUDIO_SECONDS
-                            ? ' applied'
-                            : ' ignored because matched audio is under 3s'}
-                          .
-                        </p>
-                      </div>
-                    ) : (
-                      <span className="text-muted text-xs">
-                        Match script to audio below to set duration automatically.
-                      </span>
-                    )}
-                  </div>
-                )}
-                <div className="mt-2">
+              <Button
+                className="w-full"
+                disabled={!status?.authenticated}
+                onClick={() => void handleGenerate()}
+              >
+                {regenerateSegment
+                  ? `Regenerate segment ${regenerateSegment.index + 1} video`
+                  : 'Queue video generation'}
+              </Button>
+
+              {draft.durationSource === 'script-audio-match' && (
+                <div>
                   <Label>Auto extra duration (seconds)</Label>
                   <input
                     type="number"
@@ -1247,57 +1154,7 @@ export function GenerationWorkspace({
                     Default is 2s. Added only when matched audio duration is at least 3s.
                   </p>
                 </div>
-              </div>
-
-              <div>
-                <Label>Script (timing only)</Label>
-                <textarea
-                  value={draft.script}
-                  onChange={(e) => patchDraft({ script: e.target.value, scriptMatch: null })}
-                  rows={4}
-                  placeholder="Paste narration script used in audio…"
-                  className="w-full mt-1 rounded-md border border-border bg-card px-3 py-2 text-xs resize-none focus:outline-none focus:ring-1 focus:ring-primary"
-                />
-              </div>
-
-              <div className="rounded border border-border p-2 space-y-2">
-                <div className="text-xs">
-                  <p className="font-medium">Linked audio</p>
-                  {draft.audioReference ? (
-                    <>
-                      <p className="text-muted truncate">{draft.audioReference.name}</p>
-                      {draft.linkedClipSourceInMs !== null && draft.linkedClipSourceOutMs !== null && (
-                        <p className="text-muted">
-                          Clip range: {Math.round(draft.linkedClipSourceInMs)}ms -{' '}
-                          {Math.round(draft.linkedClipSourceOutMs)}ms
-                        </p>
-                      )}
-                    </>
-                  ) : (
-                    <p className="text-muted">Open the project in Video Editor and click "Use for video timing" on an audio clip.</p>
-                  )}
-                </div>
-                <div className="flex gap-2">
-                  <Button size="sm" variant="outline" className="flex-1" onClick={() => void openProjectEditorTab(projectId)}>
-                    Select in editor
-                  </Button>
-                  <Button
-                    size="sm"
-                    className="flex-1"
-                    disabled={!draft.audioReference || matchingScript}
-                    onClick={() => void handleMatchScriptAudio()}
-                  >
-                    {matchingScript ? 'Matching…' : 'Match script to audio'}
-                  </Button>
-                </div>
-                {draft.scriptMatch && (
-                  <p className="text-[11px] text-muted">
-                    Match: {Math.round(draft.scriptMatch.startMs)}ms - {Math.round(draft.scriptMatch.endMs)}ms
-                    {' '}({(draft.scriptMatch.durationMs / 1000).toFixed(2)}s) · confidence{' '}
-                    {(draft.scriptMatch.confidence * 100).toFixed(1)}%
-                  </p>
-                )}
-              </div>
+              )}
             </>
           )}
 
@@ -1320,19 +1177,19 @@ export function GenerationWorkspace({
             </p>
           )}
 
-          <Button
-            className="w-full"
-            disabled={!status?.authenticated}
-            onClick={() => void handleGenerate()}
-          >
-            {regenerateSegment && mode === 'image'
-              ? regenerateSegment.pendingImageApproval
-                ? 'Generate again'
-                : `Regenerate segment ${regenerateSegment.index + 1} image`
-              : regenerateSegment && mode === 'video'
-                ? `Regenerate segment ${regenerateSegment.index + 1} video`
-                : `Queue ${mode} generation`}
-          </Button>
+          {mode === 'image' && (
+            <Button
+              className="w-full"
+              disabled={!status?.authenticated}
+              onClick={() => void handleGenerate()}
+            >
+              {regenerateSegment
+                ? regenerateSegment.pendingImageApproval
+                  ? 'Generate again'
+                  : `Regenerate segment ${regenerateSegment.index + 1} image`
+                : 'Queue image generation'}
+            </Button>
+          )}
 
           <Button size="sm" variant="outline" className="w-full" onClick={() => void refreshHiggsfield()}>
             <RefreshCw size={14} className="mr-1" /> Refresh account
