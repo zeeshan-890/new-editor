@@ -23,6 +23,7 @@ import { useCreativeInstructionsDraft } from '@renderer/hooks/useCreativeInstruc
 import { imageFilesFromClipboard, imageFilesFromPasteEvent } from '@renderer/lib/dropFiles'
 import {
   createEmptyPipelineState,
+  createEmptyScriptPart,
   normalizePipelineState,
   pipelineProgress,
   allSegmentImagesComplete,
@@ -30,8 +31,13 @@ import {
   anchorsInFlight,
   videosInFlight,
   pendingImageSegmentCount,
-  pendingVideoSegmentCount
+  pendingVideoSegmentCount,
+  scriptPartsToFullScript,
+  type PipelineScriptMode,
+  type ScriptPart
 } from '@shared/segmentPipeline'
+import { ScriptPartsEditor } from './ScriptPartsEditor'
+import { cn } from '@renderer/lib/utils'
 import {
   getProjectPipeline,
   usePipelineStore
@@ -43,7 +49,8 @@ import {
   DEFAULT_IMAGE_MODEL,
   DEFAULT_VIDEO_MODEL,
   IMAGE_ASPECT_RATIOS,
-  generateId
+  generateId,
+  resolveImageModelId
 } from '@shared/types'
 import { sortImageModels, pickImageModel, imageModelShortLabel } from '@shared/imageModels'
 
@@ -72,6 +79,7 @@ export function PipelineDashboard({
   const loadAssemblyAiSettings = usePipelineStore((s) => s.loadAssemblyAiSettings)
 
   const analyzeAndApplyScript = usePipelineStore((s) => s.analyzeAndApplyScript)
+  const enrichAndApplyScriptParts = usePipelineStore((s) => s.enrichAndApplyScriptParts)
   const updatePipeline = usePipelineStore((s) => s.updatePipeline)
   const startPipelineImages = usePipelineStore((s) => s.startPipelineImages)
   const startPipelineVideos = usePipelineStore((s) => s.startPipelineVideos)
@@ -102,7 +110,7 @@ export function PipelineDashboard({
   const imageModelId = useMemo(
     () =>
       pickImageModel(
-        project?.selectedImageModel || pipeline.imageModel || DEFAULT_IMAGE_MODEL,
+        resolveImageModelId(project?.selectedImageModel || pipeline.imageModel || DEFAULT_IMAGE_MODEL),
         imageModels
       ),
     [project?.selectedImageModel, pipeline.imageModel, imageModels]
@@ -353,6 +361,83 @@ export function PipelineDashboard({
     }
   }
 
+  const scriptMode: PipelineScriptMode = pipeline.scriptMode === 'parts' ? 'parts' : 'full'
+  const scriptParts: ScriptPart[] = pipeline.scriptParts ?? []
+
+  const setScriptMode = (mode: PipelineScriptMode): void => {
+    const current = getProjectPipeline(projectId)
+    const nextParts =
+      mode === 'parts' && (!current.scriptParts || current.scriptParts.length === 0)
+        ? [createEmptyScriptPart(0)]
+        : current.scriptParts
+    void updatePipeline(
+      projectId,
+      { ...current, scriptMode: mode, scriptParts: nextParts },
+      { immediate: true, debounceMs: 0 }
+    )
+  }
+
+  const handlePartsChange = (parts: ScriptPart[]): void => {
+    const current = getProjectPipeline(projectId)
+    const clipById = new Map(
+      parts.flatMap((p) => p.clips.map((c) => [c.id, { part: p, clip: c }] as const))
+    )
+    // Keep narration in sync; image/video prompts stay agent-owned until rebuild.
+    const segments = current.segments.map((seg) => {
+      if (!seg.sourceClipId) return seg
+      const linked = clipById.get(seg.sourceClipId)
+      if (!linked) return seg
+      return {
+        ...seg,
+        scriptText: linked.part.scriptText.trim() || seg.scriptText
+      }
+    })
+    void updatePipeline(
+      projectId,
+      {
+        ...current,
+        scriptMode: 'parts',
+        scriptParts: parts,
+        fullScript: scriptPartsToFullScript(parts),
+        segments
+      },
+      { debounceMs: 0 }
+    )
+    setScriptDraft(scriptPartsToFullScript(parts))
+  }
+
+  const handlePartsBlur = (): void => {
+    void useProjectTabStore.getState().saveProjectNow(projectId)
+  }
+
+  const handleBuildFromParts = async (): Promise<void> => {
+    setLocalError(null)
+    try {
+      const current = getProjectPipeline(projectId)
+      const scriptReferences = current.scriptReferences ?? []
+      await updatePipeline(
+        projectId,
+        {
+          ...current,
+          scriptMode: 'parts',
+          scriptParts,
+          fullScript: scriptPartsToFullScript(scriptParts),
+          creativeInstructions: instructionsDraft,
+          scriptReferences
+        },
+        { immediate: true, debounceMs: 0 }
+      )
+      await enrichAndApplyScriptParts(projectId, {
+        creativeInstructions: instructionsDraft,
+        scriptReferences
+      })
+      setScriptDraft(getProjectPipeline(projectId).fullScript)
+      scriptDirtyRef.current = false
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
   const handleReferencesChange = (
     scriptReferences: import('@shared/segmentPipeline').PipelineScriptReference[]
   ): void => {
@@ -383,36 +468,6 @@ export function PipelineDashboard({
       ? new Date(pipeline.masterAudioSyncedAt).toLocaleTimeString()
       : null
 
-  const handleStartImages = async (): Promise<void> => {
-    setLocalError(null)
-    const current = getProjectPipeline(projectId)
-    await updatePipeline(
-      projectId,
-      {
-        ...current,
-        fullScript: scriptDraft,
-        imageModel: project?.selectedImageModel ?? DEFAULT_IMAGE_MODEL,
-        videoModel: project?.selectedVideoModel ?? DEFAULT_VIDEO_MODEL,
-        workspaceId: project?.workspaceId
-      },
-      { immediate: true }
-    )
-    try {
-      await startPipelineImages(projectId)
-    } catch (err) {
-      setLocalError(err instanceof Error ? err.message : String(err))
-    }
-  }
-
-  const handleStartVideos = async (): Promise<void> => {
-    setLocalError(null)
-    try {
-      await startPipelineVideos(projectId)
-    } catch (err) {
-      setLocalError(err instanceof Error ? err.message : String(err))
-    }
-  }
-
   const handleStopPipeline = async (): Promise<void> => {
     setLocalError(null)
     setStopping(true)
@@ -441,16 +496,9 @@ export function PipelineDashboard({
   const videoButtonLabel =
     progress.videosDone === 0 ? 'Generate videos' : 'Continue videos'
 
-  const canStartImageBatch =
-    pendingImages > 0 && !batchBusy && pipeline.pipelineStatus !== 'paused'
-
-  const canStartVideoBatch =
-    imagesComplete &&
-    pendingVideos > 0 &&
-    Boolean(pipeline.masterAudioPath) &&
-    timingsReady &&
-    !batchBusy &&
-    pipeline.pipelineStatus !== 'paused'
+  /** Show enabled whenever remaining work exists (not mid-batch). */
+  const showImageAction = pendingImages > 0 && !batchBusy
+  const showVideoAction = pendingVideos > 0 && !batchBusy
 
   const canMatchTimings =
     pipeline.segments.length > 0 &&
@@ -476,18 +524,56 @@ export function PipelineDashboard({
     pipeline.segments.length === 0
       ? 'Analyze your script first to create segments.'
       : !imagesComplete
-        ? `${progress.imagesDone}/${progress.totalSegments} images ready — finish all image batches first.`
+        ? `${progress.imagesDone}/${progress.totalSegments} images ready — finish remaining images first.`
         : !pipeline.masterAudioPath
           ? 'Sync timeline audio before generating videos (needed for clip duration).'
           : !timingsReady
             ? 'Get segment timings first to extract timestamps/durations for videos.'
-          : pendingVideos === 0
-            ? progress.videosDone >= progress.totalSegments
-              ? 'All segment videos are done or failed.'
-              : 'No segments are ready for video — ensure each segment has an approved image.'
-            : batchBusy
-              ? 'Wait for the current batch to finish downloading.'
-              : null
+            : pendingVideos === 0
+              ? progress.videosDone >= progress.totalSegments
+                ? 'All segment videos are done or failed.'
+                : 'No segments are ready for video — ensure each segment has an image.'
+              : batchBusy
+                ? 'Wait for the current batch to finish downloading.'
+                : null
+
+  const handleStartImages = async (): Promise<void> => {
+    setLocalError(null)
+    if (batchBusy) {
+      setLocalError('Wait for the current batch to finish.')
+      return
+    }
+    const current = getProjectPipeline(projectId)
+    await updatePipeline(
+      projectId,
+      {
+        ...current,
+        fullScript: scriptDraft,
+        imageModel: project?.selectedImageModel ?? DEFAULT_IMAGE_MODEL,
+        videoModel: project?.selectedVideoModel ?? DEFAULT_VIDEO_MODEL,
+        workspaceId: project?.workspaceId
+      },
+      { immediate: true }
+    )
+    try {
+      await startPipelineImages(projectId)
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const handleStartVideos = async (): Promise<void> => {
+    setLocalError(null)
+    if (videosBlockedReason) {
+      setLocalError(videosBlockedReason)
+      return
+    }
+    try {
+      await startPipelineVideos(projectId)
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : String(err))
+    }
+  }
 
   const handleUnlockPipeline = (): void => {
     if (!window.electronAPI?.dismissAllStuckPipeline) return
@@ -495,6 +581,7 @@ export function PipelineDashboard({
       usePipelineStore.getState().handlePipelineUpdated(projectId, next)
     })
   }
+
   return (
     <div className="flex flex-col gap-4 p-4">
       <div className="flex items-center justify-between gap-2">
@@ -655,7 +742,8 @@ export function PipelineDashboard({
           3. Segments {pipeline.segments.length || '—'}
           {pipeline.analyzedAt != null && pipeline.segments.length > 0 && (
             <span className="block text-[9px] text-muted truncate">
-              Analyzed {new Date(pipeline.analyzedAt).toLocaleString()}
+              {scriptMode === 'parts' ? 'Built' : 'Analyzed'}{' '}
+              {new Date(pipeline.analyzedAt).toLocaleString()}
             </span>
           )}
         </div>
@@ -670,18 +758,47 @@ export function PipelineDashboard({
         </div>
       </div>
 
-      <div className="space-y-1">
-        <Label>Full script</Label>
-        <textarea
-          value={scriptDraft}
-          onChange={(e) => handleScriptChange(e.target.value)}
-          onPaste={handleScriptPaste}
-          onBlur={handleScriptBlur}
-          rows={8}
-          spellCheck
-          placeholder="Paste your complete narration script here…"
-          className="w-full rounded-md border border-border bg-card px-3 py-2 text-xs resize-y min-h-[120px] focus:outline-none focus:ring-1 focus:ring-primary"
-        />
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <Label>{scriptMode === 'parts' ? 'Script parts' : 'Full script'}</Label>
+          <div className="flex rounded-md border border-border overflow-hidden">
+            {(['full', 'parts'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setScriptMode(mode)}
+                className={cn(
+                  'px-2.5 py-1 text-[10px] font-medium capitalize transition-colors',
+                  scriptMode === mode
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted hover:text-foreground hover:bg-card'
+                )}
+              >
+                {mode === 'full' ? 'Full script' : 'Parts'}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {scriptMode === 'full' ? (
+          <textarea
+            value={scriptDraft}
+            onChange={(e) => handleScriptChange(e.target.value)}
+            onPaste={handleScriptPaste}
+            onBlur={handleScriptBlur}
+            rows={8}
+            spellCheck
+            placeholder="Paste your complete narration script here…"
+            className="w-full rounded-md border border-border bg-card px-3 py-2 text-xs resize-y min-h-[120px] focus:outline-none focus:ring-1 focus:ring-primary"
+          />
+        ) : (
+          <ScriptPartsEditor
+            parts={scriptParts}
+            segments={pipeline.segments}
+            onChange={handlePartsChange}
+            onPersist={handlePartsBlur}
+          />
+        )}
       </div>
 
       <ScriptBriefPanel
@@ -706,19 +823,36 @@ export function PipelineDashboard({
           )}
           Sync from editor timeline
         </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={analyzing || !scriptDraft.trim()}
-          onClick={() => void handleAnalyze()}
-        >
-          {analyzing ? (
-            <Loader2 size={14} className="mr-1 animate-spin" />
-          ) : (
-            <Sparkles size={14} className="mr-1" />
-          )}
-          Analyze script
-        </Button>
+        {scriptMode === 'full' ? (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={analyzing || !scriptDraft.trim()}
+            onClick={() => void handleAnalyze()}
+          >
+            {analyzing ? (
+              <Loader2 size={14} className="mr-1 animate-spin" />
+            ) : (
+              <Sparkles size={14} className="mr-1" />
+            )}
+            Analyze script
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={analyzing || !scriptParts.some((p) => p.scriptText.trim())}
+            title="Agents invent clips where you leave them empty, write image/video prompts, then build segments. Full script = all parts combined."
+            onClick={() => void handleBuildFromParts()}
+          >
+            {analyzing ? (
+              <Loader2 size={14} className="mr-1 animate-spin" />
+            ) : (
+              <Sparkles size={14} className="mr-1" />
+            )}
+            Build from parts
+          </Button>
+        )}
         <Button
           size="sm"
           variant="outline"
@@ -727,7 +861,9 @@ export function PipelineDashboard({
             !pipeline.masterAudioPath
               ? 'Sync timeline audio first, then extract segment timings.'
               : pipeline.segments.length === 0
-                ? 'Analyze script first.'
+                ? scriptMode === 'parts'
+                  ? 'Build from parts first.'
+                  : 'Analyze script first.'
                 : 'Extract timestamps/durations from audio for each segment'
           }
           onClick={() => void handleMatchTimings()}
@@ -764,6 +900,25 @@ export function PipelineDashboard({
             <Button size="sm" onClick={() => void resumePipeline(projectId)}>
               <Play size={14} className="mr-1" /> Resume
             </Button>
+            {showVideoAction && (
+              <Button
+                size="sm"
+                variant="outline"
+                title={videosBlockedReason ?? 'Continue video generation from where you left off'}
+                onClick={() => void handleStartVideos()}
+              >
+                <Video size={14} className="mr-1" /> {videoButtonLabel}
+              </Button>
+            )}
+            {showImageAction && (
+              <Button
+                size="sm"
+                title={imagesBlockedReason ?? 'Continue image generation'}
+                onClick={() => void handleStartImages()}
+              >
+                <Image size={14} className="mr-1" /> {imageButtonLabel}
+              </Button>
+            )}
             <Button
               size="sm"
               variant="destructive"
@@ -807,10 +962,9 @@ export function PipelineDashboard({
                 Stop
               </Button>
             )}
-            {canStartImageBatch && (
+            {showImageAction && (
               <Button
                 size="sm"
-                disabled={Boolean(imagesBlockedReason && !canStartImageBatch)}
                 title={
                   imagesBlockedReason ??
                   'Starts image generation (10 at a time). Next batches and failed images retry automatically.'
@@ -820,7 +974,7 @@ export function PipelineDashboard({
                 <Image size={14} className="mr-1" /> {imageButtonLabel}
               </Button>
             )}
-            {canStartVideoBatch && (
+            {showVideoAction && (
               <Button
                 size="sm"
                 variant="outline"
@@ -833,20 +987,6 @@ export function PipelineDashboard({
                 <Video size={14} className="mr-1" /> {videoButtonLabel}
               </Button>
             )}
-            {!canStartVideoBatch &&
-              imagesComplete &&
-              Boolean(pipeline.masterAudioPath) &&
-              pendingVideos > 0 &&
-              pipeline.pipelineStatus !== 'paused' && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled
-                  title={videosBlockedReason ?? 'Videos cannot start yet'}
-                >
-                  <Video size={14} className="mr-1" /> {videoButtonLabel}
-                </Button>
-              )}
           </>
         )}
         <Button
@@ -860,16 +1000,10 @@ export function PipelineDashboard({
         </Button>
       </div>
 
-      {imagesBlockedReason && !canStartImageBatch && pipeline.pipelineStatus !== 'paused' && !(pipeline.pipelineStatus === 'running' && batchBusy) && pendingImages > 0 && (
+      {imagesBlockedReason && showImageAction && videosBlockedReason == null && (
         <p className="text-[10px] text-muted">{imagesBlockedReason}</p>
       )}
-      {videosBlockedReason &&
-        !canStartVideoBatch &&
-        pipeline.pipelineStatus !== 'paused' &&
-        !(pipeline.pipelineStatus === 'running' && batchBusy) &&
-        imagesComplete &&
-        Boolean(pipeline.masterAudioPath) &&
-        (pendingVideos > 0 || progress.videosDone < progress.totalSegments) && (
+      {videosBlockedReason && showVideoAction && (
         <p className="text-[10px] text-muted">{videosBlockedReason}</p>
       )}
 
