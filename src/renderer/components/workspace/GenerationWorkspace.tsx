@@ -44,7 +44,8 @@ import {
   DEFAULT_ASPECT_RATIO,
   MANUAL_VIDEO_DURATION_SECONDS,
   generateId,
-  shortProjectId
+  shortProjectId,
+  resolveImageModelId
 } from '@shared/types'
 import { pickImageModel, imageModelShortLabel } from '@shared/imageModels'
 import {
@@ -180,7 +181,7 @@ export function GenerationWorkspace({
   useEffect(() => {
     if (mode !== 'image') return
     const model = pickImageModel(
-      project?.selectedImageModel || project?.pipeline?.imageModel,
+      resolveImageModelId(project?.selectedImageModel || project?.pipeline?.imageModel),
       imageModels
     )
     const current = useProjectTabStore.getState().tabDrafts[tabId]?.image
@@ -572,15 +573,84 @@ export function GenerationWorkspace({
     })
   }
 
+  const handleAttachExistingMedia = async (
+    segmentId: string,
+    media: { localPath: string; name: string; existingRefId?: string }
+  ): Promise<void> => {
+    const current = getProjectPipeline(projectId)
+    const nextRefs = [...(current.scriptReferences ?? [])]
+    let refId = media.existingRefId
+    if (refId && !nextRefs.some((r) => r.id === refId)) {
+      refId = undefined
+    }
+    if (!refId) {
+      const byPath = nextRefs.find((r) => r.localPath === media.localPath)
+      if (byPath) {
+        refId = byPath.id
+      } else {
+        refId = generateId()
+        nextRefs.push({
+          id: refId,
+          localPath: media.localPath,
+          name: media.name,
+          instruction: media.name
+        })
+      }
+    }
+
+    const segments = current.segments.map((segment) => {
+      if (segment.id !== segmentId) return segment
+      const existing = new Set(segment.scriptReferenceIds ?? [])
+      existing.add(refId!)
+      return { ...segment, scriptReferenceIds: [...existing] }
+    })
+
+    await updatePipeline(
+      projectId,
+      {
+        ...current,
+        scriptReferences: nextRefs,
+        segments
+      },
+      { immediate: true }
+    )
+  }
+
   const handleRemoveSegmentReference = (segmentId: string, referenceId: string): void => {
     const current = getProjectPipeline(projectId)
+
+    // Auto-linked continuity / character anchors
+    if (referenceId === 'prev-segment') {
+      void updatePipeline(
+        projectId,
+        updateSegmentInPipeline(current, segmentId, { continuityFromPrevious: false }),
+        { immediate: true }
+      )
+      return
+    }
+    if (referenceId.startsWith('anchor-')) {
+      const characterId = referenceId.slice('anchor-'.length)
+      const segment = current.segments.find((s) => s.id === segmentId)
+      void updatePipeline(
+        projectId,
+        updateSegmentInPipeline(current, segmentId, {
+          characters: (segment?.characters ?? []).filter((id) => id !== characterId)
+        }),
+        { immediate: true }
+      )
+      return
+    }
+
+    const segment = current.segments.find((s) => s.id === segmentId)
+    const linked = segment?.scriptReferenceIds?.length
+      ? segment.scriptReferenceIds
+      : (current.scriptReferences ?? []).map((r) => r.id)
     void updatePipeline(
       projectId,
       updateSegmentInPipeline(current, segmentId, {
-        scriptReferenceIds: (current.segments.find((s) => s.id === segmentId)
-          ?.scriptReferenceIds ?? []
-        ).filter((id) => id !== referenceId)
-      })
+        scriptReferenceIds: linked.filter((id) => id !== referenceId)
+      }),
+      { immediate: true }
     )
   }
 
@@ -1234,7 +1304,6 @@ export function GenerationWorkspace({
             <Button size="sm" variant="outline" onClick={() => void openProjectEditorTab(projectId)}>
               <Scissors size={14} className="mr-1" /> Video editor
             </Button>
-            <span className="text-[10px] text-muted hidden sm:inline">Shared gallery · composer persists in project</span>
           </div>
         </div>
 
@@ -1269,6 +1338,7 @@ export function GenerationWorkspace({
                 onOpenInSidebar={handleOpenSegmentInSidebar}
                 onApproveSegment={handleApproveSegmentImage}
                 onAttachSegmentImages={handleAttachSegmentImages}
+                onAttachExistingMedia={handleAttachExistingMedia}
                 onRemoveSegmentReference={handleRemoveSegmentReference}
               />
             </div>
