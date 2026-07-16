@@ -1,4 +1,73 @@
+import type { HiggsfieldJobStatus } from '@shared/types'
 import type { CharacterProfile, ScriptSegment, SegmentStatus } from '@shared/segmentPipeline'
+
+export type SegmentGenerationPhase = 'idle' | 'waiting' | 'generating'
+
+export type HiggsfieldJobStatusLookup = Map<string, { status: HiggsfieldJobStatus }>
+
+function phaseFromJobStatus(jobStatus: HiggsfieldJobStatus | undefined): SegmentGenerationPhase {
+  if (!jobStatus || jobStatus === 'queued') return 'waiting'
+  if (jobStatus === 'running') return 'generating'
+  return 'waiting'
+}
+
+export function segmentImagePhase(
+  segment: ScriptSegment,
+  jobById: HiggsfieldJobStatusLookup
+): SegmentGenerationPhase {
+  if (segment.status !== 'image_running') return 'idle'
+  const job = segment.imageJobId ? jobById.get(segment.imageJobId) : undefined
+  return phaseFromJobStatus(job?.status)
+}
+
+export function segmentVideoPhase(
+  segment: ScriptSegment,
+  jobById: HiggsfieldJobStatusLookup
+): SegmentGenerationPhase {
+  if (segment.status !== 'video_running') return 'idle'
+  const job = segment.videoJobId ? jobById.get(segment.videoJobId) : undefined
+  return phaseFromJobStatus(job?.status)
+}
+
+export function resolveSegmentImagePhase(
+  segment: ScriptSegment,
+  jobById: HiggsfieldJobStatusLookup,
+  retryPending?: boolean
+): SegmentGenerationPhase {
+  const phase = segmentImagePhase(segment, jobById)
+  if (phase !== 'idle') return phase
+  return retryPending ? 'waiting' : 'idle'
+}
+
+export function resolveSegmentVideoPhase(
+  segment: ScriptSegment,
+  jobById: HiggsfieldJobStatusLookup,
+  retryPending?: boolean
+): SegmentGenerationPhase {
+  const phase = segmentVideoPhase(segment, jobById)
+  if (phase !== 'idle') return phase
+  return retryPending ? 'waiting' : 'idle'
+}
+
+export function segmentStatusDisplay(
+  segment: ScriptSegment,
+  jobById: HiggsfieldJobStatusLookup
+): { label: string; phase: SegmentGenerationPhase } {
+  if (segment.status === 'image_running') {
+    const phase = segmentImagePhase(segment, jobById)
+    if (phase === 'waiting') return { label: 'Waiting', phase }
+    return { label: STATUS_LABELS.image_running, phase }
+  }
+  if (segment.status === 'video_running') {
+    const phase = segmentVideoPhase(segment, jobById)
+    if (phase === 'waiting') return { label: 'Waiting', phase }
+    return { label: STATUS_LABELS.video_running, phase }
+  }
+  return {
+    label: STATUS_LABELS[segment.status] ?? segment.status,
+    phase: isRunningStatus(segment.status) ? 'generating' : 'idle'
+  }
+}
 
 export function formatAudioRef(segment: ScriptSegment): string {
   if (!segment.scriptMatch) return '—'
