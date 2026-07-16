@@ -16,7 +16,8 @@ import { applyVideoSoundParams } from '../../shared/videoGeneration'
 import {
   buildSegmentImageReferences
 } from '../../shared/pipelineImageRefs'
-import { appendSceneVisualGuards } from '../../shared/pipelinePromptGuards'
+import { appendSceneVisualGuards, buildMedicalDiagramImagePrompt, classifySceneVisualMode } from '../../shared/pipelinePromptGuards'
+import { appendCreativeGuidance } from '../../shared/creativeInstructions'
 
 export { buildSegmentImageReferences } from '../../shared/pipelineImageRefs'
 
@@ -73,6 +74,26 @@ export function buildSegmentImagePrompt(
   segment: ScriptSegment,
   pipeline: SegmentPipelineState
 ): string {
+  const mode = classifySceneVisualMode(segment.imagePrompt, segment.scriptText)
+  const creative = pipeline.creativeInstructions
+
+  // Medical / scientific diagrams: isolated subject only — never add lifestyle setting,
+  // characters, or cinematic room framing (those cause text labels and busy backgrounds).
+  if (mode === 'diagram') {
+    const refHint = attachedReferenceHint(segment, pipeline)
+    const styleHint = pipeline.styleLock.visualStyle?.trim()
+    const subject = [
+      segment.imagePrompt.trim(),
+      styleHint ? `Look / style: ${styleHint}` : '',
+      refHint
+    ]
+      .filter(Boolean)
+      .join('\n\n')
+    return appendCreativeGuidance(buildMedicalDiagramImagePrompt(subject), creative, {
+      forDiagram: true
+    })
+  }
+
   const characters = pipeline.characters
   const styleLock = pipeline.styleLock
   const presentCharacters = segment.characters
@@ -88,7 +109,8 @@ export function buildSegmentImagePrompt(
         ? `Focus on ${presentCharacters[0].name} as the ${presentCharacters[0].role}; posture and props must match that role.`
         : ''
 
-  // segment.imagePrompt is already AI-synthesized from clips + applicable creative/refs at analyze time.
+  // segment.imagePrompt should already include analyze-time creative; re-apply from
+  // pipeline.creativeInstructions so freeform briefs still hit generation if under-applied.
   const parts = [
     styleLock.visualStyle,
     storySettingLine(styleLock),
@@ -106,8 +128,8 @@ export function buildSegmentImagePrompt(
     'Full scene composition suitable for image-to-video animation: clear subjects, readable depth, natural lighting, room for clear subject and camera motion.'
   ].filter(Boolean)
 
-  // Hardcoded visual-mode guards at enqueue time (applies even without re-analyze).
-  return appendSceneVisualGuards(parts.join('\n\n'), segment.imagePrompt, segment.scriptText)
+  const withCreative = appendCreativeGuidance(parts.join('\n\n'), creative)
+  return appendSceneVisualGuards(withCreative, segment.imagePrompt, segment.scriptText)
 }
 
 /** Default when analyze left motion empty or too weak for image-to-video. */
@@ -129,6 +151,12 @@ function isWeakVideoMotion(motion: string): boolean {
 }
 
 function deriveMotionFromSegment(segment: ScriptSegment): string {
+  if (classifySceneVisualMode(segment.imagePrompt, segment.scriptText) === 'diagram') {
+    const clipHint = segment.imagePrompt?.trim().slice(0, 160)
+    return clipHint
+      ? `Slow cinematic orbit and gentle push-in around the medical diagram (${clipHint}). Soft lighting shift across the structure; keep the diagram unlabeled on a plain background — no text appearing.`
+      : 'Slow cinematic orbit and gentle push-in around the medical diagram on a plain background. Soft lighting drift; keep it unlabeled — no text appearing.'
+  }
   const clipHint = segment.imagePrompt?.trim().slice(0, 160)
   if (clipHint) {
     return `Animate the scene with clear continuous motion matching: ${clipHint}. Camera slowly pushes in; subjects move naturally — not a still frame.`
@@ -206,6 +234,24 @@ export function buildSegmentVideoPrompt(
   pipeline: SegmentPipelineState
 ): string {
   const motion = resolveSegmentVideoMotion(segment)
+  const mode = classifySceneVisualMode(segment.imagePrompt, segment.scriptText)
+  const creative = pipeline.creativeInstructions
+
+  if (mode === 'diagram') {
+    const parts = [
+      motion,
+      'Animate this medical diagram still into video: slow orbit or push-in, subtle lighting change, structure stays sharp and centered.',
+      attachedReferenceHint(segment, pipeline),
+      'Keep the diagram as the ONLY visual on an empty plain neutral background for the full duration — never introduce text, labels, people, props, rooms, insets, or any other visuals.'
+    ].filter(Boolean)
+    const withCreative = appendCreativeGuidance(parts.join('\n\n'), creative, {
+      forVideo: true,
+      forDiagram: true
+    })
+    return appendSceneVisualGuards(withCreative, segment.imagePrompt, segment.scriptText, {
+      forVideo: true
+    })
+  }
 
   const parts = [
     motion,
@@ -214,12 +260,10 @@ export function buildSegmentVideoPrompt(
     'Keep identity, wardrobe, and packaging consistent with the start frame and any attached references.'
   ].filter(Boolean)
 
-  return appendSceneVisualGuards(
-    parts.join('\n\n'),
-    segment.imagePrompt,
-    segment.scriptText,
-    { forVideo: true }
-  )
+  const withCreative = appendCreativeGuidance(parts.join('\n\n'), creative, { forVideo: true })
+  return appendSceneVisualGuards(withCreative, segment.imagePrompt, segment.scriptText, {
+    forVideo: true
+  })
 }
 
 export function buildSegmentVideoEnqueue(
